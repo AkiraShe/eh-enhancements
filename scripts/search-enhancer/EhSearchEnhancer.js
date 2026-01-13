@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.0
+// @version      2.0.1
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
@@ -14847,8 +14847,8 @@
                 return false;
             }
             // 根路径 "/" 或带搜索参数都算作列表页
-            // 包含 uploader 页面（点击作者名进入的页面）
-            return path === '/' || params.has('f_search') || params.has('f_cats') || path.includes('/watched') || path.includes('/uploader/') || path === '';
+            // 包含 uploader 页面（点击作者名进入的页面）、收藏页、订阅页等
+            return path === '/' || params.has('f_search') || params.has('f_cats') || path.includes('/watched') || path.includes('/uploader/') || path.includes('/favorites') || path === '';
         } catch (err) {
             return false;
         }
