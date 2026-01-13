@@ -8,7 +8,7 @@
 // @match        *://exhentai.org/*
 // @grant        none
 // @license      MIT
-// @homepage     https://github.com/[username]/eh-enhancements
+// @homepage     https://github.com/AkiraShe/eh-enhancements
 // ==/UserScript==
 
 /*

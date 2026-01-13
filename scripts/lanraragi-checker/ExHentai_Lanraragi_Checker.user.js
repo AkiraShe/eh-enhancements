@@ -12,6 +12,8 @@
 // @version     1.5
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
+// @homepage     https://github.com/AkiraShe/eh-enhancements
+// @supportURL   https://github.com/AkiraShe/eh-enhancements/issues
 // ==/UserScript==
 
 (function() {

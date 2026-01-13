@@ -4,8 +4,8 @@
 // @version      1.3
 // @description  发送任务到Aria2,并查看下载进度
 // @author       xioxin, SchneeHertz, AkiraShe
-// @homepage     https://github.com/EhTagTranslation/UserScripts
-// @supportURL   https://github.com/EhTagTranslation/UserScripts/issues
+// @homepage     https://github.com/AkiraShe/eh-enhancements
+// @supportURL   https://github.com/AkiraShe/eh-enhancements/issues
 // @include      *://exhentai.org/*
 // @include      *://e-hentai.org/*
 // @include      *hath.network/archive/*
