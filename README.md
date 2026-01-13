@@ -29,6 +29,17 @@ E-Hentai/ExHentai 增强脚本集合 - 为E站提供更强大的功能和更好�
 
 📖 [详细说明](./scripts/aria-helper/README.md)
 
+### 3. **ExHentai Lanraragi Checker** - Lanraragi检查脚本（修改版）
+自动检查E-Hentai/ExHentai上的画廊是否已在您的Lanraragi库中。
+
+- ✅ 自动检查 - 浏览时自动检查每个画廊
+- ✅ 状态标记 - 绿色✔已收集、紫色！相似作品、红色❓出错
+- ✅ 缓存优化 - 减少重复查询
+- ✅ 简繁体转换 - 提升跨地区搜索准确率
+- ✅ 深度搜索 - 通过作者+标题搜索相似作品
+
+📖 [详细说明](./scripts/lanraragi-checker/README.md)
+
 ## 🚀 快速开始
 
 ### 安装方法
@@ -112,6 +123,7 @@ E-Hentai/ExHentai 增强脚本集合 - 为E站提供更强大的功能和更好�
 
 - [E-Hentai & ExHentai Fade or hide viewed galleries](https://sleazyfork.org/en/scripts/36314-e-hentai-exhentai-fade-or-hide-viewed-galleries) - 隐藏已查看画廊的实现
 - [EH-UserScripts by SchneeHertz](https://github.com/SchneeHertz/EH-UserScripts) - 种子信息菜单布局参考
+- [Putarku/LANraragi-scripts](https://github.com/Putarku/LANraragi-scripts) - ExHentai Lanraragi Checker 原版脚本
 
 ## 📝 开源协议
 
