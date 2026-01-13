@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         EhAria2下载助手
 // @namespace    com.xioxin.AriaEh
-// @version      1.2
+// @version      1.3
 // @description  发送任务到Aria2,并查看下载进度
-// @author       xioxin, SchneeHertz
+// @author       xioxin, SchneeHertz, AkiraShe
 // @homepage     https://github.com/EhTagTranslation/UserScripts
 // @supportURL   https://github.com/EhTagTranslation/UserScripts/issues
 // @include      *://exhentai.org/*
@@ -23,8 +23,6 @@
 // @connect      localhost
 // @connect      127.0.0.1
 // @connect      *
-// @downloadURL https://update.sleazyfork.org/scripts/432210/EhAria2%E4%B8%8B%E8%BD%BD%E5%8A%A9%E6%89%8B.user.js
-// @updateURL https://update.sleazyfork.org/scripts/432210/EhAria2%E4%B8%8B%E8%BD%BD%E5%8A%A9%E6%89%8B.meta.js
 // ==/UserScript==
 
 
