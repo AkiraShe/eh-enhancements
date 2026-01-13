@@ -43,7 +43,10 @@ Aria2下载管理脚本，与EhSearchEnhancer深度适配，提供便捷的下�
    - 下载地址：https://github.com/aria2/aria2/releases
    - 或使用 Aria2 Web UI：https://github.com/ziahamza/webui-aria2
 
-### 安装步骤
+### 快速安装
+点击直接安装：[AriaEh.user.js](./AriaEh.user.js)
+
+### 手动安装
 
 1. **安装脚本**
    - 打开 Tampermonkey/Greasemonkey
@@ -207,19 +210,6 @@ EhSearchEnhancer                AriaEh
 4. 更新脚本到最新版本
 ```
 
-## 🔄 更新日志
-
-### v2.0 (修改版)
-- ✨ 深度适配EhSearchEnhancer
-- 🔧 修复了某些情况下获取不到压缩包名称的问题
-- 🎨 优化菜单界面
-- 📊 增强下载历史功能
-- ⚙️ 完善配置系统
-
-### 原始版本
-- 基础的Aria2集成功能
-- 种子管理功能
-
 ## 🙏 致谢
 
 - 原作者：[SchneeHertz](https://github.com/SchneeHertz)
@@ -230,16 +220,11 @@ EhSearchEnhancer                AriaEh
 - [Aria2官网](https://github.com/aria2/aria2)
 - [Aria2 WebUI](https://github.com/ziahamza/webui-aria2)
 - [EhSearchEnhancer](../search-enhancer/README.md)
+- [更新日志](../../CHANGELOG.md)
 
 ## 📄 许可证
 
 MIT License - 详见项目根目录的 LICENSE 文件
-
-## 📮 反馈与支持
-
-遇到问题或有建议？
-- 提交 GitHub Issue
-- 在脚本站点留言
 
 ---
 

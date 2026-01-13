@@ -68,6 +68,12 @@ Forked and modified from [Putarku/LANraragi-scripts](https://github.com/Putarku/
 
 原版脚本由 Putarku 开发，本版本由 AkiraShe 修改并维护。
 
+## 📝 相关链接
+
+- [更新日志](../../CHANGELOG.md)
+- [安装指南](../../docs/installation-guide.md)
+- [Lanraragi 项目](https://github.com/Difegue/LANraragi)
+
 ## 许可证
 
 MIT License

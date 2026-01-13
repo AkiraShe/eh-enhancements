@@ -266,30 +266,16 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 
 ## 🚀 安装
 
-### 方式一：脚本管理器安装
+### 快速安装
+点击直接安装：[EhSearchEnhancer.js](./EhSearchEnhancer.js)
+
+### 手动安装
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Greasemonkey](https://www.greasespot.net/)
 2. 打开脚本管理器
 3. 点击"创建新脚本"或"新建脚本"
 4. 复制 `EhSearchEnhancer.js` 的全部内容
 5. 粘贴到编辑器
 6. 保存并启用
-
-### 方式二：从脚本站点安装（待上传）
-- Greasy Fork
-- Sleazy Fork
-
-## 📝 更新日志
-
-### v2.0 (2026-01-12)
-- ✨ 重大功能升级
-- 🎨 UI优化和菜单重组
-- 📋 添加完整功能说明系统
-- ⚙️ 完善设置菜单
-- 🔧 修复多项bug
-
-### v1.0
-- 初始版本
-- 基础的多选和磁链显示功能
 
 ## 🙏 致谢
 
@@ -301,12 +287,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 
 MIT License - 详见项目根目录的 LICENSE 文件
 
-## 📮 反馈与支持
+## 📝 相关链接
 
-如遇到问题或有建议，欢迎：
-- 提交 GitHub Issue
-- 在脚本站点留言
-
----
-
-**最后更新**：2026-01-13
+- [更新日志](../../CHANGELOG.md)
+- [安装指南](../../docs/installation-guide.md)
