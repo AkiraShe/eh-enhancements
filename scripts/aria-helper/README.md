@@ -62,7 +62,10 @@ Aria2下载管理脚本，与EhSearchEnhancer深度适配，提供便捷的下�
 
 #### 3. 查看下载状态
 ```
-• Aria2Web UI - 访问 http://localhost:6800/webui
+• 使用 Aria2 Web UI 查看下载进度
+  - webui-aria2: https://github.com/ziahamza/webui-aria2
+  - AriaNg: https://ariang.github.io/
+  - 将 Web UI 指向你的 Aria2 RPC 地址（默认 http://localhost:6800）
 ```
 
 ### 高级功能
@@ -75,11 +78,7 @@ Aria2下载管理脚本，与EhSearchEnhancer深度适配，提供便捷的下�
 #### 种子管理
 - 查看种子可用性
 - 一键下载种子文件
-
-#### 下载历史
-- 查看最近下载的画廊
-- 快速重新发送
-- 导出下载列表
+- 种子信息快速浮窗展示
 
 ## ⚙️ 配置说明
 
@@ -101,17 +100,6 @@ Aria2启动参数：
 aria2c --enable-rpc --rpc-listen-port=6800
 ```
 
-### 脚本设置
-
-#### 自动保存偏好
-- 记住上次使用的下载工具
-- 记住上次选择的链接类型
-
-#### 下载历史
-- 最多保存100条记录
-- 可导出为文件
-- 可导入历史记录
-
 ## 🔗 与EhSearchEnhancer的集成
 
 ### 无缝协作
@@ -124,8 +112,8 @@ EhSearchEnhancer                AriaEh
 ```
 
 ### 共享设置
-- 共享Aria2端口配置
-- 同步下载历史记录
+- 两个脚本共享 Aria2 端口配置
+- 在一个脚本中修改 Aria2 地址，另一个脚本会同步应用
 
 ## 🐛 故障排查
 
