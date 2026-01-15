@@ -66,7 +66,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 
 - 📊 **数据管理**
   - 导出/导入选择列表
-  - 保存最近下载记录（最多999条）
+  - 保存最近下载记录（最多999个批次记录）
   - 批量查询和清除标记
 
 - 💾 **设置管理**
@@ -74,6 +74,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
   - 导入备份设置
 
 ## 界面预览
+
 ### 复选框和复选框右键菜单
 <img width="1578" height="1336" alt="image" src="https://github.com/user-attachments/assets/69bfcd82-27cc-4a36-a199-6882bae1970d" />
 
@@ -84,7 +85,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 <img width="303" height="370" alt="image" src="https://github.com/user-attachments/assets/4c8f55bc-8b97-4dc2-98dc-cc3dd29366ca" />
 
 ### 页面右上、右下角的提示信息和设置菜单
-<img width="598" height="947" alt="image" src="https://github.com/user-attachments/assets/3110aa19-b974-49a2-b770-9bd24825ee51" />
+<img width="598" height="947" alt="image" src="https://github.com/user-attachments/assets/3110aa18-b974-49a2-b770-9bd24825ee51" />
 
 ### 发送下载（选中多类型画廊时）
 <img width="778" height="1023" alt="image" src="https://github.com/user-attachments/assets/b5a74c7b-d457-4018-ad20-c06702cefe9f" />
@@ -96,7 +97,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 <img width="1082" height="736" alt="image" src="https://github.com/user-attachments/assets/3e0949d6-07c9-4388-8ed0-8e08af353565" />
 
 ### 画廊详情页
-<img width="348" height="637" alt="image" src="https://github.com/user-attachments/assets/84904c76-5e10-46c4-8568-846b9a0a7bd9" />
+<img width="348" height="637" alt="image" src="https://github.com/user-attachments/assets/84904c57-5e10-46c4-8568-846b9a0a7bd9" />
 
 ## 📖 使用指南
 
@@ -199,6 +200,20 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 - **范围**：1-999条
 - **默认值**：100
 
+## 🔗 与Aria2的集成
+
+### 配置Aria2
+- 需要安装并运行 Aria2
+- 确保 Aria2 RPC 服务可访问（默认 http://localhost:6800/jsonrpc）
+- 可在设置中修改端口
+
+### 配置AB DM（下载管理器）
+- 需要安装 AB Download Manager
+- 脚本会自动检测并与AB DM通信
+- 在设置中配置正确的端口号
+
+详见 [脚本安装指南 - 外部依赖安装](../../docs/installation-guide.md#外部依赖安装)
+
 ## ⚠️ 注意事项
 
 1. **仅适配缩略图模式**
@@ -229,19 +244,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
        - 仅启用无限滚动（手动悬停刷新）
        - 仅启用自动刷新（单页面）
        - 多页面操作时降低并发数至3以下
-   - 鼠标悬停刷新用于单画廊体验，不影响整体性能
-
-## 🔗 相关配置
-
-### 配合Aria2使用
-- 需要安装并运行 Aria2
-- 确保 Aria2 RPC 服务可访问（默认 http://localhost:6800/jsonrpc）
-- 可在设置中修改端口
-
-### 配合AB DM（下载管理器）使用
-- 需要安装 AB Download Manager
-- 脚本会自动检测并与AB DM通信
-- 在设置中配置正确的端口号
+     - 鼠标悬停刷新用于单画廊体验，不影响整体性能
 
 ## 🐛 故障排查
 
@@ -264,19 +267,6 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 - 检查是否清空了浏览器缓存
 - 尝试导入之前导出的备份设置
 
-## 🚀 安装
-
-### 快速安装
-点击直接安装：[EhSearchEnhancer.js](./EhSearchEnhancer.js)
-
-### 手动安装
-1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Greasemonkey](https://www.greasespot.net/)
-2. 打开脚本管理器
-3. 点击"创建新脚本"或"新建脚本"
-4. 复制 `EhSearchEnhancer.js` 的全部内容
-5. 粘贴到编辑器
-6. 保存并启用
-
 ## 🙏 致谢
 
 参考实现和灵感来源：
@@ -291,3 +281,8 @@ MIT License - 详见项目根目录的 LICENSE 文件
 
 - [更新日志](../../CHANGELOG.md)
 - [安装指南](../../docs/installation-guide.md)
+- [与 AriaEh 的集成](../aria-helper/README.md)
+
+---
+
+**最后更新**：2026-01-15

@@ -3,6 +3,7 @@
 ## 前置要求
 
 ### 脚本管理器
+
 脚本需要运行在油猴脚本管理器中，请选择安装以下任意一个：
 
 - **Tampermonkey**（推荐）
@@ -18,13 +19,15 @@
 
 ## 快速安装
 
+### 直接安装链接
+
 对于本项目的脚本，直接点击下方对应的安装链接：
 
 - [EhSearchEnhancer](../scripts/search-enhancer/EhSearchEnhancer.js) - 搜索增强脚本
 - [AriaEh](../scripts/aria-helper/AriaEh.user.js) - Aria2下载助手
 - [ExHentai Lanraragi Checker](../scripts/lanraragi-checker/ExHentai_Lanraragi_Checker.user.js) - Lanraragi检查脚本
 
-## 手动安装
+### 手动安装步骤
 
 如果直接安装链接不工作，可以手动安装：
 
@@ -41,10 +44,22 @@
    - 保存脚本（Ctrl+S）
    - 脚本自动启用
 
-## 特殊依赖
+## 外部依赖安装
+
+### EhSearchEnhancer
+
+EhSearchEnhancer 可独立运行，无外部依赖。但建议搭配以下工具获得最佳体验：
+
+#### Aria2（推荐用于磁链下载）
+- GitHub: https://github.com/aria2/aria2/releases
+- 详细配置请查看 [EhSearchEnhancer README](../scripts/search-enhancer/README.md)
+
+#### AB Download Manager（用于归档下载）
+- 需要配置脚本中的 AB DM 端口
 
 ### AriaEh - Aria2下载助手
-需要搭配 Aria2 使用（可选但推荐）：
+
+需要搭配 Aria2 使用：
 
 - **Aria2 安装**
   - GitHub: https://github.com/aria2/aria2/releases
@@ -55,11 +70,20 @@
   - AriaNg: https://ariang.github.io/
 
 ### ExHentai Lanraragi Checker
+
 需要搭配 Lanraragi 使用：
 
 - **Lanraragi 安装**
   - GitHub: https://github.com/Difegue/LANraragi
   - 需要本地或远程服务器
+  - 详细配置请查看 [Lanraragi Checker README](../scripts/lanraragi-checker/README.md)
+
+## 多脚本兼容性
+
+可以同时安装多个脚本，本项目的脚本设计互相兼容：
+
+- **EhSearchEnhancer 和 AriaEh**：无缝配合，推荐一起使用
+- **ExHentai Lanraragi Checker**：独立运行，可与其他脚本共存
 
 ## 常见问题
 
@@ -70,19 +94,21 @@ A:
 3. 刷新页面重新加载脚本
 4. 打开浏览器控制台（F12）查看是否有错误信息
 
-### Q: 可以同时安装多个脚本吗？
-A: 可以。本项目的脚本设计互相兼容：
-- EhSearchEnhancer 和 AriaEh 无缝配合
-- ExHentai Lanraragi Checker 独立运行
-
 ### Q: 更新脚本后旧设置会丢失吗？
 A: 不会。脚本数据存储在浏览器 LocalStorage 中，更新脚本不会清除设置。
 
 ### Q: 如何卸载脚本？
 A: 在脚本管理器中找到脚本，点击删除或关闭即可。
 
+### Q: 可以同时使用多个脚本管理器吗？
+A: 可以，但建议只使用一个以避免冲突。
+
 ## 获取帮助
 
 - 📝 查看各脚本详细说明：见各脚本目录的 README.md
 - 🐛 报告问题：[GitHub Issues](https://github.com/AkiraShe/eh-enhancements/issues)
 - 💬 讨论功能：[GitHub Discussions](https://github.com/AkiraShe/eh-enhancements/discussions)
+
+---
+
+**最后更新**：2026-01-15

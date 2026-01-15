@@ -35,33 +35,6 @@ Aria2下载管理脚本，与EhSearchEnhancer深度适配，提供便捷的下�
   - 自定义Aria2端口
   - 记忆用户偏好
 
-## 🔧 安装
-
-### 前置要求
-1. **Tampermonkey/Greasemonkey** - 脚本管理器
-2. **Aria2** - 下载管理工具（推荐）
-   - 下载地址：https://github.com/aria2/aria2/releases
-   - 或使用 Aria2 Web UI：https://github.com/ziahamza/webui-aria2
-
-### 快速安装
-点击直接安装：[AriaEh.user.js](./AriaEh.user.js)
-
-### 手动安装
-
-1. **安装脚本**
-   - 打开 Tampermonkey/Greasemonkey
-   - 点击"创建新脚本"
-   - 复制 `AriaEh.user.js` 的全部内容
-   - 粘贴到编辑器并保存
-
-2. **配置Aria2**
-   ```
-   • 启动 Aria2 服务
-   • 记下RPC监听地址和端口（默认 http://127.0.0.1:6800）
-   • 在脚本设置中配置该地址
-   ```
-
-
 ## 📖 使用指南
 
 ### 基础使用
@@ -220,6 +193,7 @@ EhSearchEnhancer                AriaEh
 - [Aria2官网](https://github.com/aria2/aria2)
 - [Aria2 WebUI](https://github.com/ziahamza/webui-aria2)
 - [EhSearchEnhancer](../search-enhancer/README.md)
+- [脚本安装指南](../../docs/installation-guide.md)
 - [更新日志](../../CHANGELOG.md)
 
 ## 📄 许可证
@@ -228,4 +202,4 @@ MIT License - 详见项目根目录的 LICENSE 文件
 
 ---
 
-**最后更新**：2026-01-12
+**最后更新**：2026-01-15

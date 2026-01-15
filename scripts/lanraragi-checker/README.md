@@ -20,11 +20,6 @@
 - 🔄 缓存机制 - 对检查结果进行缓存，减少重复查询
 - 🔐 配置菜单 - 通过脚本菜单配置服务器地址、API密钥等
 
-## 安装
-
-1. 确保已安装Tampermonkey或Violentmonkey等油猴扩展
-2. 点击[安装脚本](./ExHentai_Lanraragi_Checker.user.js)
-
 ## 配置
 
 ### 基础配置
@@ -57,10 +52,15 @@ const LRR_API_KEY = ''; // 如果您的 Lanraragi API 需要密钥，请填写
 
 ## 效果示例
 
-![示例截图描述]
 - 在画廊列表中，每个画廊标题前会显示Lanraragi检查的结果标记
 - 鼠标悬停标记可查看详细信息
 - 通过脚本菜单可快速访问配置页面
+
+## 📝 相关链接
+
+- [Lanraragi 项目](https://github.com/Difegue/LANraragi)
+- [脚本安装指南](../../docs/installation-guide.md)
+- [更新日志](../../CHANGELOG.md)
 
 ## Credits / 致谢
 
@@ -68,12 +68,10 @@ Forked and modified from [Putarku/LANraragi-scripts](https://github.com/Putarku/
 
 原版脚本由 Putarku 开发，本版本由 AkiraShe 修改并维护。
 
-## 📝 相关链接
-
-- [更新日志](../../CHANGELOG.md)
-- [安装指南](../../docs/installation-guide.md)
-- [Lanraragi 项目](https://github.com/Difegue/LANraragi)
-
 ## 许可证
 
-MIT License
+MIT License - 详见项目根目录的 LICENSE 文件
+
+---
+
+**最后更新**：2026-01-15
