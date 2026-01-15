@@ -85,7 +85,7 @@ E-Hentai搜索页增强脚本 - 提供强大的多选、批量操作和磁链管
 <img width="303" height="370" alt="image" src="https://github.com/user-attachments/assets/4c8f55bc-8b97-4dc2-98dc-cc3dd29366ca" />
 
 ### 页面右上、右下角的提示信息和设置菜单
-<img width="598" height="947" alt="image" src="https://github.com/user-attachments/assets/3110aa18-b974-49a2-b770-9bd24825ee51" />
+<img width="598" height="947" alt="image" src="https://github.com/user-attachments/assets/3110aa19-b974-49a2-b770-9bd24825ee51" />
 
 ### 发送下载（选中多类型画廊时）
 <img width="778" height="1023" alt="image" src="https://github.com/user-attachments/assets/b5a74c7b-d457-4018-ad20-c06702cefe9f" />
