@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.0.1
+// @version      2.0.2
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
@@ -998,11 +998,14 @@
         try {
             const tx = idbDatabase.transaction(IDB_STORES.downloadedGalleries, 'readwrite');
             const store = tx.objectStore(IDB_STORES.downloadedGalleries);
+            
+            // 对于已下载数据，全量替换以确保删除正确
             await new Promise((resolve, reject) => {
                 const clearReq = store.clear();
                 clearReq.onsuccess = resolve;
                 clearReq.onerror = reject;
             });
+            
             for (const [gid, timestamp] of Object.entries(data)) {
                 await new Promise((resolve, reject) => {
                     const addReq = store.add({ gid: String(gid), timestamp });
@@ -1011,7 +1014,7 @@
                 });
             }
             await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
-            console.log(`[EhMagnet] 已保存${Object.keys(data).length}个已下载画廊到IndexedDB`);
+            console.log(`[EhMagnet] 已更新${Object.keys(data).length}个已下载画廊到IndexedDB`);
             return true;
         } catch (err) {
             console.error('[EhMagnet] 保存已下载画廊失败:', err);
@@ -1047,11 +1050,14 @@
         try {
             const tx = idbDatabase.transaction(IDB_STORES.downloadedMagnets, 'readwrite');
             const store = tx.objectStore(IDB_STORES.downloadedMagnets);
+            
+            // 对于已下载数据，全量替换以确保删除正确
             await new Promise((resolve, reject) => {
                 const clearReq = store.clear();
                 clearReq.onsuccess = resolve;
                 clearReq.onerror = reject;
             });
+            
             for (const item of data) {
                 await new Promise((resolve, reject) => {
                     const addReq = store.add(item);
@@ -1060,7 +1066,7 @@
                 });
             }
             await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
-            console.log(`[EhMagnet] 已保存${data.length}条已下载磁链到IndexedDB`);
+            console.log(`[EhMagnet] 已更新${data.length}条已下载磁链到IndexedDB`);
             return true;
         } catch (err) {
             console.error('[EhMagnet] 保存已下载磁链失败:', err);
@@ -1092,11 +1098,14 @@
         try {
             const tx = idbDatabase.transaction(IDB_STORES.ignoredGalleries, 'readwrite');
             const store = tx.objectStore(IDB_STORES.ignoredGalleries);
+            
+            // 对已忽略的数据，先清空再添加以确保删除正确
             await new Promise((resolve, reject) => {
                 const clearReq = store.clear();
                 clearReq.onsuccess = resolve;
                 clearReq.onerror = reject;
             });
+            
             for (const [gid, timestamp] of Object.entries(data)) {
                 await new Promise((resolve, reject) => {
                     const addReq = store.add({ gid: String(gid), timestamp });
@@ -1105,7 +1114,7 @@
                 });
             }
             await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
-            console.log(`[EhMagnet] 已保存${Object.keys(data).length}个已忽略画廊到IndexedDB`);
+            console.log(`[EhMagnet] 已更新${Object.keys(data).length}个已忽略画廊到IndexedDB`);
             return true;
         } catch (err) {
             console.error('[EhMagnet] 保存已忽略画廊失败:', err);
@@ -1141,11 +1150,14 @@
         try {
             const tx = idbDatabase.transaction(IDB_STORES.ignoredMagnets, 'readwrite');
             const store = tx.objectStore(IDB_STORES.ignoredMagnets);
+            
+            // 对已忽略的数据，先清空再添加以确保删除正确
             await new Promise((resolve, reject) => {
                 const clearReq = store.clear();
                 clearReq.onsuccess = resolve;
                 clearReq.onerror = reject;
             });
+            
             for (const item of data) {
                 await new Promise((resolve, reject) => {
                     const addReq = store.add(item);
@@ -1154,13 +1166,15 @@
                 });
             }
             await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
-            console.log(`[EhMagnet] 已保存${data.length}条已忽略磁链到IndexedDB`);
+            console.log(`[EhMagnet] 已更新${data.length}条已忽略磁链到IndexedDB`);
             return true;
         } catch (err) {
             console.error('[EhMagnet] 保存已忽略磁链失败:', err);
             return false;
         }
     };
+
+    // 删除单个忽略的 magnet 从 IndexedDB（同步触发，不等待完成）
 
     const loadIgnoredMagnetsFromIDB = async () => {
         if (!idbSupported || !idbDatabase) return null;
@@ -2057,9 +2071,9 @@
                         });
                     }
                     
-                    if (galleries && Object.keys(galleries).length > 0) {
+                    if ((galleries && Object.keys(galleries).length > 0) || (magnets && magnets.length > 0)) {
                         console.log('[EhMagnet] 从IndexedDB加载已下载状态');
-                        // 跳过localStorage
+                        // 数据加载完成
                     } else {
                         throw new Error('IndexedDB为空');
                     }
@@ -2069,54 +2083,6 @@
                 }
             }
 
-            // 降级或初始加载：从localStorage读取
-            if (downloadedGalleries.size === 0) {
-                const rawGalleries = localStorage.getItem(downloadStorageKey);
-                if (rawGalleries) {
-                    const data = JSON.parse(rawGalleries);
-                    if (data && typeof data === 'object') {
-                        Object.entries(data).forEach(([gid, timestamp]) => {
-                            let normalizedTs = normalizeTimestampValue(timestamp);
-                            // 如果标准化后的时间戳无效（为0或负数），使用当前时间
-                            // 这会清理掉"X小时后"这样的错误数据
-                            if (!normalizedTs || normalizedTs <= 0) {
-                                console.warn('[EhMagnet] 发现无效的时间戳，已替换为当前时间:', { gid, timestamp });
-                                normalizedTs = Date.now();
-                            }
-                            downloadedGalleries.set(String(gid), normalizedTs);
-                            legacyDownloadedGalleries.add(String(gid));
-                        });
-                    }
-                }
-
-                if (storedVersion >= 2) {
-                    const rawMagnets = localStorage.getItem(downloadMagnetStorageKey);
-                    if (rawMagnets) {
-                        const data = JSON.parse(rawMagnets);
-                        if (Array.isArray(data)) {
-                            data.forEach((item) => {
-                                if (!item || typeof item !== 'object') return;
-                                const { href, gid, timestamp } = item;
-                                if (!href) return;
-                                let normalizedTs = normalizeTimestampValue(timestamp);
-                                // 如果标准化后的时间戳无效（为0或负数），使用当前时间
-                                if (!normalizedTs || normalizedTs <= 0) {
-                                    console.warn('[EhMagnet] 发现无效的磁链时间戳，已替换为当前时间:', { href, timestamp });
-                                    normalizedTs = Date.now();
-                                }
-                                downloadedMagnets.set(href, {
-                                    gid: gid ? String(gid) : '',
-                                    timestamp: normalizedTs,
-                                    autoGenerated: item.autoGenerated === true,
-                                });
-                                if (gid) {
-                                    ensureDownloadedSet(gid).add(href);
-                                }
-                            });
-                        }
-                    }
-                }
-            }
 
             const excludePref = localStorage.getItem(EXCLUDE_PREF_KEY);
                 if (excludePref !== null) {
@@ -2237,7 +2203,7 @@
                         });
                     }
                     
-                    if (galleries && Object.keys(galleries).length > 0) {
+                    if ((galleries && Object.keys(galleries).length > 0) || (magnets && magnets.length > 0)) {
                         console.log('[EhMagnet] 从IndexedDB加载已忽略状态');
                         return;
                     }
@@ -2246,43 +2212,12 @@
                 }
             }
             
-            // 降级或初始加载：从localStorage读取
-            const rawGalleries = localStorage.getItem(ignoreStorageKey);
-            if (rawGalleries) {
-                const data = JSON.parse(rawGalleries);
-                if (data && typeof data === 'object') {
-                    Object.entries(data).forEach(([gid, timestamp]) => {
-                        ignoredGalleries.set(String(gid), timestamp);
-                    });
-                }
-            }
-
-            const rawMagnets = localStorage.getItem(ignoreMagnetStorageKey);
-            if (rawMagnets) {
-                const entries = JSON.parse(rawMagnets);
-                if (Array.isArray(entries)) {
-                    entries.forEach((entry) => {
-                        if (!entry || typeof entry !== 'object') return;
-                        const { href, gid, timestamp } = entry;
-                        if (!href) return;
-                        ignoredMagnets.set(href, {
-                            gid: gid ? String(gid) : '',
-                            timestamp: timestamp,
-                        });
-                        if (gid) {
-                            const set = ensureIgnoredSet(gid);
-                            set.add(href);
-                            ignoredGalleries.set(String(gid), timestamp);
-                        }
-                    });
-                }
-            }
         } catch (err) {
             console.warn('[EhMagnet] 加载忽略状态失败', err);
         }
     };
 
-    const persistDownloadedState = () => {
+    const persistDownloadedState = async () => {
         try {
             const payload = {};
             downloadedGalleries.forEach((timestamp, gid) => {
@@ -2296,27 +2231,16 @@
                 autoGenerated: info.autoGenerated === true,
             }));
 
-            // 后台异步保存到IndexedDB
-            (async () => {
+            // 异步保存到IndexedDB
+            if (idbSupported && idbDatabase) {
                 try {
-                    if (idbSupported && idbDatabase) {
-                        await saveDownloadedGalleriesToIDB(payload);
-                        await saveDownloadedMagnetsToIDB(magnetPayload);
-                        console.log('[EhMagnet] 已下载状态已保存到IndexedDB');
-                        return;
-                    }
+                    await saveDownloadedGalleriesToIDB(payload);
+                    await saveDownloadedMagnetsToIDB(magnetPayload);
+                    console.log('[EhMagnet] 已下载状态已保存到IndexedDB');
                 } catch (err) {
-                    console.warn('[EhMagnet] 保存到IndexedDB失败，降级到localStorage:', err);
+                    console.warn('[EhMagnet] 保存到IndexedDB失败:', err);
                 }
-                
-                // 降级到localStorage
-                try {
-                    localStorage.setItem(downloadStorageKey, JSON.stringify(payload));
-                    localStorage.setItem(downloadMagnetStorageKey, JSON.stringify(magnetPayload));
-                } catch (err) {
-                    console.warn('[EhMagnet] 保存到localStorage失败:', err);
-                }
-            })();
+            }
 
             localStorage.setItem(storageVersionKey, String(STORAGE_VERSION));
             bumpStateRevision();
@@ -2334,7 +2258,7 @@
         }
     };
 
-    const persistIgnoredState = () => {
+    const persistIgnoredState = async () => {
         try {
             const payload = {};
             ignoredGalleries.forEach((timestamp, gid) => {
@@ -2347,27 +2271,16 @@
                 timestamp: info.timestamp,
             }));
 
-            // 后台异步保存到IndexedDB
-            (async () => {
+            // 异步保存到IndexedDB
+            if (idbSupported && idbDatabase) {
                 try {
-                    if (idbSupported && idbDatabase) {
-                        await saveIgnoredGalleriesToIDB(payload);
-                        await saveIgnoredMagnetsToIDB(magnetPayload);
-                        console.log('[EhMagnet] 已忽略状态已保存到IndexedDB');
-                        return;
-                    }
+                    await saveIgnoredGalleriesToIDB(payload);
+                    await saveIgnoredMagnetsToIDB(magnetPayload);
+                    console.log('[EhMagnet] 已忽略状态已保存到IndexedDB');
                 } catch (err) {
-                    console.warn('[EhMagnet] 保存到IndexedDB失败，降级到localStorage:', err);
+                    console.warn('[EhMagnet] 保存到IndexedDB失败:', err);
                 }
-                
-                // 降级到localStorage
-                try {
-                    localStorage.setItem(ignoreStorageKey, JSON.stringify(payload));
-                    localStorage.setItem(ignoreMagnetStorageKey, JSON.stringify(magnetPayload));
-                } catch (err) {
-                    console.warn('[EhMagnet] 保存到localStorage失败:', err);
-                }
-            })();
+            }
 
             bumpStateRevision();
         } catch (err) {
@@ -2652,7 +2565,10 @@
             galleryInfo,
         }));
         let stateChanged = false;
-        if (downloadedMagnets.delete(magnetHref)) stateChanged = true;
+        if (downloadedMagnets.delete(magnetHref)) {
+            stateChanged = true;
+            // IndexedDB 删除通过 persistDownloadedState() 的全量替换自动处理
+        }
 
         if (gid) {
             let hasManualMarks = false;
@@ -2760,7 +2676,9 @@
     const unmarkMagnetIgnored = (magnetHref, galleryInfo, options = {}) => {
         if (!magnetHref) return;
         const { silent = false, skipPersist = false } = options || {};
-        ignoredMagnets.delete(magnetHref);
+        if (ignoredMagnets.delete(magnetHref)) {
+            // IndexedDB 删除通过 persistIgnoredState() 的全量替换自动处理
+        }
         const gid = galleryInfo?.gid ? String(galleryInfo.gid) : '';
         withDebugLog(() => console.log('[EhMagnet] unmarkMagnetIgnored:init', {
             magnetHref,
@@ -2792,6 +2710,7 @@
         ignoredGalleries.set(gid, Date.now());
         let downloadChanged = false;
         const rows = document.querySelectorAll(`.eh-magnet-item[data-gallery-gid="${escapeForSelector(gid)}"]`);
+        console.log('[EhMagnet] markGalleryIgnored 找到', rows.length, '个磁链行，gid:', gid);
         rows.forEach((row) => {
             const magnetHref = row.dataset.magnetValue || row.querySelector('.eh-magnet-checkbox')?.dataset.magnetValue;
             if (!magnetHref) return;
@@ -2799,6 +2718,7 @@
             const removed = markMagnetIgnored(magnetHref, info, { silent: true, skipPersist: true });
             if (removed) downloadChanged = true;
         });
+        console.log('[EhMagnet] markGalleryIgnored 完成，galleryIgnoredMagnets.get(gid):', galleryIgnoredMagnets.get(gid)?.size || 0);
         persistIgnoredState();
         if (downloadChanged) persistDownloadedState();
         updateStatusFlags();
@@ -2832,6 +2752,7 @@
             console.log('[EhMagnet] 清理 galleryIgnoredMagnets，共', magnetSet.size, '个磁链');
             magnetSet.forEach(href => {
                 ignoredMagnets.delete(href);
+                // IndexedDB 删除通过 persistIgnoredState() 的全量替换自动处理
             });
             galleryIgnoredMagnets.delete(gid);
         }
@@ -3995,6 +3916,13 @@
                     button.dataset.hovered = 'false';
                     updateGalleryIgnoreButtonState(button, info.gid);
                 } else if (state === 'marked') {
+                    // 删除该画廊的所有已下载磁链（包括不在页面上可见的）
+                    const galleryMagnets = galleryDownloadedMagnets.get(gidStr) || new Set();
+                    galleryMagnets.forEach(magnetHref => {
+                        unmarkMagnetDownloaded(magnetHref, info, { silent: true, skipPersist: true });
+                    });
+                    
+                    // 同时处理页面上的磁链（以防有遗漏）
                     const magnetRows = document.querySelectorAll(`.eh-magnet-item[data-gallery-gid="${escapeForSelector(gidStr)}"]`);
                     const resolveRowInfo = (row, checkbox) => {
                         const infoFromDataset = buildGalleryInfoFromDataset(row.dataset)
@@ -4010,7 +3938,7 @@
                             || checkbox?.dataset.magnetValue
                             || checkbox?.dataset.archiveKey
                             || '';
-                        if (!magnetKey) return;
+                        if (!magnetKey || galleryMagnets.has(magnetKey)) return;  // 避免重复删除
                         unmarkMagnetDownloaded(magnetKey, rowInfo, { silent: true, skipPersist: true });
                     });
                     removeGalleryDownloadRecords(gidStr);
@@ -4467,7 +4395,7 @@
             refreshAllItem.style.fontSize = '13px';
             refreshAllItem.style.fontWeight = '600';
             refreshAllItem.style.textAlign = 'left';
-            refreshAllItem.textContent = '🔄 刷新全部';
+            refreshAllItem.textContent = '🔄 刷新全部画廊';
             refreshAllItem.title = '刷新当前页面的所有画廊';
             refreshAllItem.addEventListener('mouseenter', () => {
                 refreshAllItem.style.background = hoverBg;
@@ -4539,7 +4467,7 @@
             refreshAllForceItem.style.fontSize = '13px';
             refreshAllForceItem.style.fontWeight = '600';
             refreshAllForceItem.style.textAlign = 'left';
-            refreshAllForceItem.textContent = '🔄 强制刷新全部';
+            refreshAllForceItem.textContent = '⚡ 强制刷新全部画廊';
             refreshAllForceItem.title = '强制刷新所有画廊，忽略缓存';
             refreshAllForceItem.addEventListener('mouseenter', () => {
                 refreshAllForceItem.style.background = hoverBg;
@@ -5684,7 +5612,8 @@
             return parts.length ? parts.join(' | ') : `${entries.length} 条`;
         };
 
-        batches.forEach((batch) => {
+        // 按倒序排列批次，最新的在上面
+        batches.reverse().forEach((batch) => {
             const batchEl = document.createElement('div');
             batchEl.className = 'eh-recent-batch';
 
@@ -13964,7 +13893,7 @@
         };
     };
 
-    const applySettingsPayload = (data) => {
+    const applySettingsPayload = async (data) => {
         if (!data || typeof data !== 'object') throw new Error('格式错误');
         downloadedMagnets.clear();
         galleryDownloadedMagnets.clear();
@@ -14080,8 +14009,8 @@
             magnetRequestQueue.minIntervalRange = [refreshIntervalMin, refreshIntervalMax];
         }
 
-        persistDownloadedState();
-        persistIgnoredState();
+        await persistDownloadedState();
+        await persistIgnoredState();
         persistExcludePreference();
         persistLogPreference();
         persistSearchInfiniteScrollPreference();
@@ -14271,12 +14200,13 @@
         importButton.style.cursor = 'pointer';
         importButton.style.fontSize = '13px';
         importButton.style.fontWeight = '600';
-        importButton.addEventListener('click', () => {
+        importButton.addEventListener('click', async () => {
             const input = window.prompt('粘贴导出的 JSON 设置：');
             if (!input) return;
             try {
                 const data = JSON.parse(input);
-                applySettingsPayload(data);
+                toastInfo('导入中...');
+                await applySettingsPayload(data);
                 toastSuccess('导入成功');
             } catch (err) {
                 console.warn('导入设置失败', err);
@@ -14322,16 +14252,17 @@
             input.type = 'file';
             input.accept = 'application/json,.json';
             input.style.display = 'none';
-            input.addEventListener('change', () => {
+            input.addEventListener('change', async () => {
                 const file = input.files && input.files[0];
                 input.remove();
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = () => {
+                reader.onload = async () => {
                     try {
                         const text = typeof reader.result === 'string' ? reader.result : String(reader.result || '');
                         const data = JSON.parse(text);
-                        applySettingsPayload(data);
+                        toastInfo('导入中...');
+                        await applySettingsPayload(data);
                         toastSuccess('导入成功');
                     } catch (err) {
                         console.warn('文件导入设置失败', err);
