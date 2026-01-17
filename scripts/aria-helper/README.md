@@ -173,7 +173,7 @@ EhSearchEnhancer                AriaEh
 ## 🙏 致谢
 
 - 原作者：[SchneeHertz](https://github.com/SchneeHertz)
-- 原项目：[EH-UserScripts](https://github.com/SchneeHertz/EH-UserScripts)
+- 原项目：[AriaEh](https://github.com/SchneeHertz/EH-UserScripts/tree/master/AriaEh)
 
 ## 📝 相关链接
 

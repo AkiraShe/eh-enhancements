@@ -4290,7 +4290,7 @@
             markItem.style.fontSize = '13px';
             markItem.style.fontWeight = '600';
             markItem.style.textAlign = 'left';
-            markItem.textContent = isMarked ? '✓ 取消标记' : '📌 标记此画廊';
+            markItem.innerHTML = isMarked ? '&nbsp;✓&nbsp;&nbsp;取消标记' : '📌&nbsp;标记此画廊';
             markItem.title = isMarked ? '取消标记此画廊' : '标记此画廊为已下载';
             const hoverBg = getMenuHoverBackground();
             markItem.addEventListener('mouseenter', () => {
@@ -4396,7 +4396,7 @@
             ignoreItem.style.fontSize = '13px';
             ignoreItem.style.fontWeight = '600';
             ignoreItem.style.textAlign = 'left';
-            ignoreItem.textContent = isIgnored ? '✓ 取消忽略' : '🚫 忽略此画廊';
+            ignoreItem.innerHTML = isIgnored ? '&nbsp;✓&nbsp;&nbsp;取消忽略' : '🚫&nbsp;忽略此画廊';
             ignoreItem.title = isIgnored ? '取消忽略此画廊' : '忽略此画廊，不再显示';
             ignoreItem.addEventListener('mouseenter', () => {
                 ignoreItem.style.background = hoverBg;
@@ -12444,10 +12444,10 @@
                 item.style.cursor = 'pointer';
             }
             if (item.dataset.action === 'ignore') {
-                item.textContent = magnetIgnored ? '✓ 取消忽略' : '🚫 忽略';
+                item.innerHTML = magnetIgnored ? '&nbsp;✓&nbsp;&nbsp;取消忽略' : '🚫&nbsp;忽略';
             }
             if (item.dataset.action === 'mark') {
-                item.textContent = magnetDownloaded ? '✓ 取消标记' : '📌 标记';
+                item.innerHTML = magnetDownloaded ? '&nbsp;✓&nbsp;&nbsp;取消标记' : '📌&nbsp;标记';
             }
         });
 
