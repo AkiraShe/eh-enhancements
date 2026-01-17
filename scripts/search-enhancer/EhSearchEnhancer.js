@@ -4290,7 +4290,11 @@
             markItem.style.fontSize = '13px';
             markItem.style.fontWeight = '600';
             markItem.style.textAlign = 'left';
-            markItem.textContent = isMarked ? '✓ 取消标记' : '📌 标记此画廊';
+            markItem.style.display = 'flex';
+            markItem.style.alignItems = 'center';
+            markItem.innerHTML = isMarked 
+                ? '<span style="display: inline-block; width: 1.2em;">✓</span> 取消标记' 
+                : '<span style="display: inline-block; width: 1.2em;">📌</span> 标记此画廊';
             markItem.title = isMarked ? '取消标记此画廊' : '标记此画廊为已下载';
             const hoverBg = getMenuHoverBackground();
             markItem.addEventListener('mouseenter', () => {
@@ -4396,7 +4400,11 @@
             ignoreItem.style.fontSize = '13px';
             ignoreItem.style.fontWeight = '600';
             ignoreItem.style.textAlign = 'left';
-            ignoreItem.textContent = isIgnored ? '✓ 取消忽略' : '🚫 忽略此画廊';
+            ignoreItem.style.display = 'flex';
+            ignoreItem.style.alignItems = 'center';
+            ignoreItem.innerHTML = isIgnored 
+                ? '<span style="display: inline-block; width: 1.2em;">✓</span> 取消忽略' 
+                : '<span style="display: inline-block; width: 1.2em;">🚫</span> 忽略此画廊';
             ignoreItem.title = isIgnored ? '取消忽略此画廊' : '忽略此画廊，不再显示';
             ignoreItem.addEventListener('mouseenter', () => {
                 ignoreItem.style.background = hoverBg;
@@ -12444,10 +12452,14 @@
                 item.style.cursor = 'pointer';
             }
             if (item.dataset.action === 'ignore') {
-                item.textContent = magnetIgnored ? '✓ 取消忽略' : '🚫 忽略';
+                item.innerHTML = magnetIgnored 
+                    ? '<span style="display: inline-block; width: 1.2em;">✓</span> 取消忽略' 
+                    : '<span style="display: inline-block; width: 1.2em;">🚫</span> 忽略';
             }
             if (item.dataset.action === 'mark') {
-                item.textContent = magnetDownloaded ? '✓ 取消标记' : '📌 标记';
+                item.innerHTML = magnetDownloaded 
+                    ? '<span style="display: inline-block; width: 1.2em;">✓</span> 取消标记' 
+                    : '<span style="display: inline-block; width: 1.2em;">📌</span> 标记';
             }
         });
 
