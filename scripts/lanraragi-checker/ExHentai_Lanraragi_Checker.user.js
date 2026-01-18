@@ -9,7 +9,7 @@
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @license MIT
-// @version     1.5
+// @version     1.6
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -36,14 +36,15 @@
     // ===== 原字典内容已移至文件末尾 =====
 
     // --- 用户配置开始 ---
-    const LRR_SERVER_URL = 'http://localhost:3000'; // 替换为您的 Lanraragi 服务器地址
-    const LRR_API_KEY = ''; // 如果您的 Lanraragi API 需要密钥，请填写
+    // 注意：以下值仅作为备用，优先使用脚本设置界面中保存的值
+    const DEFAULT_LRR_SERVER_URL = 'http://localhost:3000'; // 替换为您的 Lanraragi 服务器地址
+    const DEFAULT_LRR_API_KEY = ''; // 如果您的 Lanraragi API 需要密钥，请填写
     // --- 用户配置结束 ---
     
     // 其他配置（可选）
     const DEFAULT_CONFIG = {
-        lrrServerUrl: LRR_SERVER_URL,
-        lrrApiKey: LRR_API_KEY,
+        lrrServerUrl: DEFAULT_LRR_SERVER_URL,
+        lrrApiKey: DEFAULT_LRR_API_KEY,
         maxConcurrentRequests: 5,
         cacheExpiryDays: 7,
         enableDeepSearch: true,
@@ -540,20 +541,50 @@
         }
     }
 
-    // 将GM_xmlhttpRequest包装为Promise
+    // 将网络请求包装为Promise（使用 GM_xmlhttpRequest）
     function makeRequest(options) {
         return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
+            let timeoutId;
+            const timeout = options.timeout || 30000; // 30秒超时
+            
+            timeoutId = setTimeout(() => {
+                console.warn(`[LRR Checker] Request timeout after ${timeout}ms: ${options.url}`);
+                reject(new Error(`Request timeout after ${timeout}ms`));
+            }, timeout);
+            
+            const requestConfig = {
                 method: options.method,
                 url: options.url,
                 headers: options.headers,
+                responseType: 'text',
                 onload: function(response) {
-                    resolve(response);
+                    clearTimeout(timeoutId);
+                    // status 0 可能是沙箱限制，但可能仍有 responseText
+                    if (response.status === 0 && !response.responseText) {
+                        console.warn(`[LRR Checker] Received empty response (status 0, no text)`);
+                        reject(new Error('Empty response from server'));
+                    } else {
+                        resolve(response);
+                    }
                 },
                 onerror: function(error) {
+                    clearTimeout(timeoutId);
+                    console.debug(`[LRR Checker] Network request error (will retry):`, error.finalUrl);
                     reject(error);
+                },
+                onabort: function() {
+                    clearTimeout(timeoutId);
+                    console.warn(`[LRR Checker] Request aborted`);
+                    reject(new Error('Request aborted'));
+                },
+                ontimeout: function() {
+                    clearTimeout(timeoutId);
+                    console.warn(`[LRR Checker] Request timeout`);
+                    reject(new Error('Request timeout'));
                 }
-            });
+            };
+            
+            GM_xmlhttpRequest(requestConfig);
         });
     }
 
@@ -690,10 +721,10 @@
     // 处理单个画廊的查询
     async function processGallery(gallery) {
         const { galleryUrl, titleElement, cacheKey } = gallery;
-        const apiUrl = `${LRR_SERVER_URL}/api/plugins/use?plugin=urlfinder&arg=${encodeURIComponent(galleryUrl)}`;
+        const apiUrl = `${CONFIG.lrrServerUrl}/api/plugins/use?plugin=urlfinder&arg=${encodeURIComponent(galleryUrl)}`;
         const headers = {};
-        if (LRR_API_KEY) {
-            headers['Authorization'] = `Bearer ${LRR_API_KEY}`;
+        if (CONFIG.lrrApiKey) {
+            headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
         }
 
         try {
@@ -1044,10 +1075,10 @@
 
     // 获取存档详细信息
     async function fetchArchiveInfo(archiveId) {
-        const apiUrl = `${LRR_SERVER_URL}/api/archives/${archiveId}/metadata`;
+        const apiUrl = `${CONFIG.lrrServerUrl}/api/archives/${archiveId}/metadata`;
         const headers = {};
-        if (LRR_API_KEY) {
-            headers['Authorization'] = `Bearer ${LRR_API_KEY}`;
+        if (CONFIG.lrrApiKey) {
+            headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
         }
 
         try {
@@ -1191,10 +1222,10 @@
             }
         }
         
-        const randomSearchUrl = `${LRR_SERVER_URL}/api/search/random?filter=${encodeURIComponent(searchQuery)}`;
+        const randomSearchUrl = `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodeURIComponent(searchQuery)}`;
         const headers = {};
-        if (LRR_API_KEY) {
-            headers['Authorization'] = `Bearer ${LRR_API_KEY}`;
+        if (CONFIG.lrrApiKey) {
+            headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
         }
 
         try {
@@ -1322,6 +1353,11 @@
             }
         } catch (error) {
             console.error(`[LRR Checker] Network error during alternative search:`, error);
+            console.log(`[LRR Checker] Error object details:`, {
+                hasResponse: !!error?.response,
+                responseText: error?.response?.responseText?.substring(0, 100) || null,
+                errorMessage: error?.message
+            });
             return { success: false, searchQuery, error };
         }
     }
@@ -2069,12 +2105,16 @@
         
         // 优先级1：检查用户定义的作者关键词
         for (const knownAuthor of userAuthors) {
-            if (fullTitle.includes(knownAuthor)) {
-                author = knownAuthor;
+            // 大小写不敏感的匹配
+            const authorRegex = new RegExp(knownAuthor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            const authorMatch = fullTitle.match(authorRegex);
+            if (authorMatch) {
+                // 使用实际匹配到的文本作为作者（保持原始大小写）
+                author = authorMatch[0];
                 // 提取标题：去除作者部分和标签
                 let remainingTitle = fullTitle;
-                // 移除作者名称
-                remainingTitle = remainingTitle.replace(knownAuthor, '').trim();
+                // 移除作者名称（使用原始匹配的文本）
+                remainingTitle = remainingTitle.replace(authorMatch[0], '').trim();
                 // 先移除方括号和圆括号内容
                 remainingTitle = remainingTitle.replace(/\s*\([^\)]+\)\s*/g, ' ');
                 remainingTitle = remainingTitle.replace(/\s*\[[^\]]+\]\s*/g, ' ');
