@@ -9,7 +9,7 @@
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @license MIT
-// @version     1.6
+// @version     1.6.1
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -485,14 +485,15 @@
         }
     `);
 
-    const CACHE_DURATION = 60 * 60 * 1000; // 1h in milliseconds
-    const CLEANUP_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days cleanup interval
+    // 注：CACHE_DURATION 和 CLEANUP_INTERVAL 都将在 cleanupExpiredCache 中使用 CONFIG.cacheExpiryDays 来计算
+    const CLEANUP_INTERVAL = 1 * 24 * 60 * 60 * 1000; // 1 day cleanup interval
 
     function getCache(key) {
         const cached = localStorage.getItem(key);
         if (cached) {
             const { timestamp, data } = JSON.parse(cached);
-            if (Date.now() - timestamp < CACHE_DURATION) {
+            const cacheExpiryMs = CONFIG.cacheExpiryDays * 24 * 60 * 60 * 1000;
+            if (Date.now() - timestamp < cacheExpiryMs) {
                 return data;
             }
         }
@@ -512,10 +513,13 @@
         const lastCleanup = localStorage.getItem('lrr-cache-last-cleanup');
         const currentTime = Date.now();
 
-        // 如果距离上次清理超过7天，执行清理
+        // 如果距离上次清理超过1天，执行清理
         if (!lastCleanup || (currentTime - parseInt(lastCleanup)) > CLEANUP_INTERVAL) {
             console.log('[LRR Checker] Starting cache cleanup...');
             let removedCount = 0;
+
+            // 根据用户设置的缓存有效期计算过期时间
+            const cacheExpiryMs = CONFIG.cacheExpiryDays * 24 * 60 * 60 * 1000;
 
             for (let i = 0; i < localStorage.length; i++) {
                 const key = localStorage.key(i);
@@ -524,7 +528,8 @@
                         const item = localStorage.getItem(key);
                         if (item) {
                             const cacheData = JSON.parse(item);
-                            if (currentTime - cacheData.timestamp > CACHE_DURATION) {
+                            // 删除超过设定有效期的缓存
+                            if (currentTime - cacheData.timestamp > cacheExpiryMs) {
                                 localStorage.removeItem(key);
                                 removedCount++;
                                 i--; // 因为删除后数组长度变化
