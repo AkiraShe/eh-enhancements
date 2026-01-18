@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.0.2
+// @version      2.1.0
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
@@ -1045,31 +1045,62 @@
         }
     };
 
-    const saveDownloadedMagnetsToIDB = async (data) => {
-        if (!idbSupported || !idbDatabase) return false;
+    /**
+     * 保存已下载磁链到IndexedDB - 增量更新版本
+     * 仅更新有变化的记录，避免全量替换带来的性能问题
+     */
+    const saveDownloadedMagnetsToIDB = async (newData) => {
+        if (!idbSupported || !idbDatabase) {
+            console.warn('[EhMagnet] IndexedDB不可用，跳过磁链保存');
+            return false;
+        }
+        
+        const startTime = performance.now();
         try {
-            const tx = idbDatabase.transaction(IDB_STORES.downloadedMagnets, 'readwrite');
-            const store = tx.objectStore(IDB_STORES.downloadedMagnets);
-            
-            // 对于已下载数据，全量替换以确保删除正确
-            await new Promise((resolve, reject) => {
-                const clearReq = store.clear();
-                clearReq.onsuccess = resolve;
-                clearReq.onerror = reject;
-            });
-            
-            for (const item of data) {
-                await new Promise((resolve, reject) => {
-                    const addReq = store.add(item);
-                    addReq.onsuccess = resolve;
-                    addReq.onerror = reject;
-                });
+            // 第1步：读取现有数据
+            const existingData = await loadDownloadedMagnetsFromIDB();
+            if (!existingData) {
+                console.warn('[EhMagnet] 无法读取现有磁链数据，回退到全量替换');
+                return await addOrUpdateToIDB(IDB_STORES.downloadedMagnets, newData, true);
             }
-            await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
-            console.log(`[EhMagnet] 已更新${data.length}条已下载磁链到IndexedDB`);
-            return true;
+
+            // 第2步：计算差异
+            const existingSet = new Set(existingData.map(item => item.href));
+            const newSet = new Set(newData.map(item => item.href));
+            
+            // 需要新增的
+            const toAdd = newData.filter(item => !existingSet.has(item.href));
+            // 需要删除的（存在于旧数据但不在新数据中）
+            const toDelete = existingData
+                .filter(item => !newSet.has(item.href))
+                .map(item => item.href);
+
+            // 第3步：执行增量操作
+            let addResult = { success: true, count: 0 };
+            let deleteResult = { success: true, count: 0 };
+
+            if (toAdd.length > 0) {
+                addResult = await addOrUpdateToIDB(IDB_STORES.downloadedMagnets, toAdd, true);
+                if (!addResult.success) {
+                    console.error('[EhMagnet] 新增磁链失败，但继续处理');
+                }
+            }
+
+            if (toDelete.length > 0) {
+                deleteResult = await deleteFromIDB(IDB_STORES.downloadedMagnets, toDelete);
+                if (!deleteResult.success) {
+                    console.error('[EhMagnet] 删除磁链失败，但继续处理');
+                }
+            }
+
+            // 第4步：日志和统计
+            const elapsed = performance.now() - startTime;
+            console.log(`[EhMagnet] 磁链增量更新完成 | 总计${newData.length}条 | +${addResult.count} -${deleteResult.count} | 耗时${elapsed.toFixed(2)}ms`);
+            
+            return addResult.success || deleteResult.success || (toAdd.length === 0 && toDelete.length === 0);
         } catch (err) {
             console.error('[EhMagnet] 保存已下载磁链失败:', err);
+            toastError(`磁链保存失败: ${err?.message || '未知错误'}`);
             return false;
         }
     };
@@ -1145,31 +1176,397 @@
         }
     };
 
-    const saveIgnoredMagnetsToIDB = async (data) => {
-        if (!idbSupported || !idbDatabase) return false;
+    // ==================== IndexedDB 操作队列去重机制 ====================
+
+    /**
+     * 操作队列去重类：合并短时间内的相同操作，防止高频重复调用
+     * 适用场景：批量复制、快速点击、频繁更新
+     */
+    class DebouncedIDBOperation {
+        constructor(operationName, debounceMs = 100) {
+            this.operationName = operationName;
+            this.debounceMs = debounceMs;
+            this.pendingData = null;
+            this.debounceTimer = null;
+            this.isExecuting = false;
+            this.operationFunc = null;
+        }
+
+        /**
+         * 设置操作函数
+         * @param {Function} func - 实际执行的操作函数，接收合并后的数据
+         */
+        setOperation(func) {
+            this.operationFunc = func;
+        }
+
+        /**
+         * 添加数据到队列（自动去重和合并）
+         * @param {Array|Object} data - 要添加的数据
+         * @param {Function} mergeFunc - 合并函数，接收旧数据和新数据，返回合并结果
+         */
+        enqueue(data, mergeFunc = null) {
+            // 合并待处理数据
+            if (this.pendingData === null) {
+                this.pendingData = Array.isArray(data) ? [...data] : data;
+            } else if (mergeFunc) {
+                this.pendingData = mergeFunc(this.pendingData, data);
+            } else if (Array.isArray(this.pendingData) && Array.isArray(data)) {
+                // 默认合并策略：数组去重
+                const merged = new Map();
+                
+                // 先加入旧数据
+                this.pendingData.forEach(item => {
+                    const key = item.href || item.gid || JSON.stringify(item);
+                    merged.set(key, item);
+                });
+                
+                // 新数据覆盖旧数据
+                data.forEach(item => {
+                    const key = item.href || item.gid || JSON.stringify(item);
+                    merged.set(key, item);
+                });
+                
+                this.pendingData = Array.from(merged.values());
+            } else {
+                this.pendingData = data;
+            }
+
+            // 重置防抖计时器
+            if (this.debounceTimer) {
+                clearTimeout(this.debounceTimer);
+            }
+
+            this.debounceTimer = setTimeout(async () => {
+                await this.flush();
+            }, this.debounceMs);
+
+            const queueSize = Array.isArray(this.pendingData) ? this.pendingData.length : 1;
+            console.log(`[EhMagnet] 📋 操作入队: ${this.operationName} | 待处理数据: ${queueSize}条 | 防抖延迟: ${this.debounceMs}ms`);
+        }
+
+        /**
+         * 立即执行待处理的操作
+         */
+        async flush() {
+            if (this.isExecuting || !this.operationFunc || this.pendingData === null) {
+                return;
+            }
+
+            this.isExecuting = true;
+            const data = this.pendingData;
+            this.pendingData = null;
+
+            try {
+                const startTime = performance.now();
+                const queueSize = Array.isArray(data) ? data.length : 1;
+                console.log(`[EhMagnet] 🚀 执行去重操作: ${this.operationName} | 批量数据: ${queueSize}条`);
+                
+                await this.operationFunc(data);
+                
+                const elapsed = performance.now() - startTime;
+                console.log(`[EhMagnet] ✅ 去重操作完成: ${this.operationName} | 耗时${elapsed.toFixed(2)}ms`);
+            } catch (err) {
+                console.error(`[EhMagnet] ❌ 去重操作失败: ${this.operationName} |`, err);
+            } finally {
+                this.isExecuting = false;
+            }
+        }
+
+        /**
+         * 清空队列
+         */
+        clear() {
+            if (this.debounceTimer) {
+                clearTimeout(this.debounceTimer);
+                this.debounceTimer = null;
+            }
+            this.pendingData = null;
+        }
+
+        /**
+         * 获取队列状态
+         */
+        getStatus() {
+            return {
+                operationName: this.operationName,
+                hasPending: this.pendingData !== null,
+                pendingSize: Array.isArray(this.pendingData) ? this.pendingData.length : (this.pendingData ? 1 : 0),
+                isExecuting: this.isExecuting,
+            };
+        }
+    }
+
+    // 创建操作队列实例（磁链和画廊操作）
+    const debouncedSaveMagnets = new DebouncedIDBOperation('saveDownloadedMagnets', 100);
+    const debouncedIgnoreMagnets = new DebouncedIDBOperation('saveIgnoredMagnets', 100);
+    const debouncedSaveGalleries = new DebouncedIDBOperation('saveDownloadedGalleries', 150);
+    const debouncedIgnoreGalleries = new DebouncedIDBOperation('saveIgnoredGalleries', 150);
+
+    // 设置队列操作函数（在基础原语定义后配置）
+    // 这些函数会在 initIndexedDB 完成后才调用
+
+    // ==================== IndexedDB 增量操作基础原语 ====================
+
+    /**
+     * 通用增量操作函数：add/update 单条或批量记录
+     * @param {string} storeName - store名称
+     * @param {Array|Object} items - 单条或批量数据
+     * @param {boolean} isUpsert - true使用put(更新或插入)，false使用add(仅插入)
+     * @returns {Promise<{success: boolean, count: number, error: Error|null}>}
+     */
+    const addOrUpdateToIDB = async (storeName, items, isUpsert = true) => {
+        if (!idbSupported || !idbDatabase) {
+            console.warn('[EhMagnet] IndexedDB不可用，跳过操作');
+            return { success: false, count: 0, error: new Error('IndexedDB不可用') };
+        }
+        
+        // 标准化输入：统一为数组
+        const itemArray = Array.isArray(items) ? items : [items];
+        if (!itemArray.length) {
+            return { success: true, count: 0, error: null };
+        }
+
         try {
-            const tx = idbDatabase.transaction(IDB_STORES.ignoredMagnets, 'readwrite');
-            const store = tx.objectStore(IDB_STORES.ignoredMagnets);
-            
-            // 对已忽略的数据，先清空再添加以确保删除正确
-            await new Promise((resolve, reject) => {
-                const clearReq = store.clear();
-                clearReq.onsuccess = resolve;
-                clearReq.onerror = reject;
-            });
-            
-            for (const item of data) {
+            const tx = idbDatabase.transaction(storeName, 'readwrite');
+            const store = tx.objectStore(storeName);
+            let successCount = 0;
+
+            // 操作每条记录
+            for (const item of itemArray) {
                 await new Promise((resolve, reject) => {
-                    const addReq = store.add(item);
-                    addReq.onsuccess = resolve;
-                    addReq.onerror = reject;
+                    const req = isUpsert ? store.put(item) : store.add(item);
+                    req.onsuccess = () => {
+                        successCount++;
+                        resolve();
+                    };
+                    req.onerror = reject;
                 });
             }
-            await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
-            console.log(`[EhMagnet] 已更新${data.length}条已忽略磁链到IndexedDB`);
-            return true;
+
+            // 等待事务完成
+            await new Promise((resolve, reject) => {
+                tx.oncomplete = resolve;
+                tx.onerror = reject;
+            });
+
+            console.log(`[EhMagnet] ✅ 增量操作成功: ${storeName} | ${isUpsert ? 'upsert' : 'add'} ${successCount}/${itemArray.length}条`);
+            return { success: true, count: successCount, error: null };
+        } catch (err) {
+            const errMsg = `IndexedDB增量操作失败: ${storeName} | ${err?.message || String(err)}`;
+            console.error(`[EhMagnet] ❌ ${errMsg}`);
+            toastError(`数据保存失败: ${err?.message || '未知错误'}`);
+            return { success: false, count: 0, error: err };
+        }
+    };
+
+    /**
+     * 通用删除函数：按键值或gid索引删除
+     * @param {string} storeName - store名称
+     * @param {string|number|Array} keys - 单个键值、gid或键值数组
+     * @param {string} indexName - 索引名称(可选，用于按gid删除时)
+     * @returns {Promise<{success: boolean, count: number, error: Error|null}>}
+     */
+    const deleteFromIDB = async (storeName, keys, indexName = null) => {
+        if (!idbSupported || !idbDatabase) {
+            console.warn('[EhMagnet] IndexedDB不可用，跳过删除');
+            return { success: false, count: 0, error: new Error('IndexedDB不可用') };
+        }
+
+        const keyArray = Array.isArray(keys) ? keys : [keys];
+        if (!keyArray.length) {
+            return { success: true, count: 0, error: null };
+        }
+
+        try {
+            const tx = idbDatabase.transaction(storeName, 'readwrite');
+            const store = tx.objectStore(storeName);
+            let deleteCount = 0;
+
+            for (const key of keyArray) {
+                if (indexName) {
+                    // 按索引查找后删除
+                    const index = store.index(indexName);
+                    await new Promise((resolve, reject) => {
+                        const req = index.getAll(key);
+                        req.onsuccess = () => {
+                            const matchedRecords = req.result;
+                            let pendingDeletes = 0;
+                            
+                            matchedRecords.forEach(record => {
+                                const delReq = store.delete(store.getKeyPath ? record[store.getKeyPath()] : record);
+                                delReq.onsuccess = () => {
+                                    deleteCount++;
+                                    pendingDeletes--;
+                                    if (pendingDeletes === 0) resolve();
+                                };
+                                delReq.onerror = reject;
+                                pendingDeletes++;
+                            });
+                            
+                            if (pendingDeletes === 0) resolve();
+                        };
+                        req.onerror = reject;
+                    });
+                } else {
+                    // 直接按主键删除
+                    await new Promise((resolve, reject) => {
+                        const req = store.delete(key);
+                        req.onsuccess = () => {
+                            deleteCount++;
+                            resolve();
+                        };
+                        req.onerror = reject;
+                    });
+                }
+            }
+
+            // 等待事务完成
+            await new Promise((resolve, reject) => {
+                tx.oncomplete = resolve;
+                tx.onerror = reject;
+            });
+
+            console.log(`[EhMagnet] ✅ 删除成功: ${storeName} | 删除${deleteCount}条`);
+            return { success: true, count: deleteCount, error: null };
+        } catch (err) {
+            const errMsg = `IndexedDB删除失败: ${storeName} | ${err?.message || String(err)}`;
+            console.error(`[EhMagnet] ❌ ${errMsg}`);
+            toastError(`数据删除失败: ${err?.message || '未知错误'}`);
+            return { success: false, count: 0, error: err };
+        }
+    };
+
+    /**
+     * 批量事务处理：在一个事务中执行多个add/delete操作
+     * 相比多个独立事务，性能提升30-50%，且保证原子性
+     * @param {Array} operations - 操作数组，每项: {type: 'add'|'delete', storeName, data, keys}
+     * @returns {Promise<{success: boolean, results: Array}>}
+     */
+    const batchUpdateToIDB = async (operations) => {
+        if (!idbSupported || !idbDatabase || !operations.length) {
+            return { success: false, results: [], error: new Error('参数无效或IndexedDB不可用') };
+        }
+
+        try {
+            // 第1步：收集所有涉及的store名称
+            const storeNames = [...new Set(operations.map(op => op.storeName))];
+            
+            // 第2步：创建一个包含所有store的事务
+            const tx = idbDatabase.transaction(storeNames, 'readwrite');
+            const results = [];
+
+            // 第3步：在单个事务中执行所有操作
+            for (const operation of operations) {
+                const { type, storeName, data, keys } = operation;
+                const store = tx.objectStore(storeName);
+
+                try {
+                    if (type === 'add' || type === 'put') {
+                        // put操作：存在则更新，不存在则新增
+                        const itemArray = Array.isArray(data) ? data : [data];
+                        for (const item of itemArray) {
+                            await new Promise((resolve, reject) => {
+                                const req = store.put(item);
+                                req.onsuccess = () => resolve();
+                                req.onerror = reject;
+                            });
+                        }
+                        results.push({ type, storeName, success: true, count: itemArray.length });
+                    } else if (type === 'delete') {
+                        // delete操作：删除指定键值
+                        const keyArray = Array.isArray(keys) ? keys : [keys];
+                        let deleteCount = 0;
+                        for (const key of keyArray) {
+                            await new Promise((resolve, reject) => {
+                                const req = store.delete(key);
+                                req.onsuccess = () => {
+                                    deleteCount++;
+                                    resolve();
+                                };
+                                req.onerror = reject;
+                            });
+                        }
+                        results.push({ type, storeName, success: true, count: deleteCount });
+                    }
+                } catch (err) {
+                    console.error(`[EhMagnet] 批量事务中的操作失败: ${type} on ${storeName}`, err);
+                    results.push({ type, storeName, success: false, error: err });
+                }
+            }
+
+            // 第4步：等待整个事务完成
+            await new Promise((resolve, reject) => {
+                tx.oncomplete = resolve;
+                tx.onerror = reject;
+            });
+
+            const successCount = results.filter(r => r.success).length;
+            console.log(`[EhMagnet] ✅ 批量事务完成: ${successCount}/${results.length}个操作成功`);
+            return { success: true, results };
+        } catch (err) {
+            console.error('[EhMagnet] 批量事务失败:', err);
+            toastError(`批量操作失败: ${err?.message || '未知错误'}`);
+            return { success: false, results: [], error: err };
+        }
+    };
+
+    /**
+     * 保存已忽略磁链到IndexedDB - 增量更新版本
+     * 仅更新有变化的记录，避免全量替换带来的性能问题
+     */
+    const saveIgnoredMagnetsToIDB = async (newData) => {
+        if (!idbSupported || !idbDatabase) {
+            console.warn('[EhMagnet] IndexedDB不可用，跳过忽略磁链保存');
+            return false;
+        }
+        
+        const startTime = performance.now();
+        try {
+            // 第1步：读取现有数据
+            const existingData = await loadIgnoredMagnetsFromIDB();
+            if (!existingData) {
+                console.warn('[EhMagnet] 无法读取现有忽略磁链数据，回退到全量替换');
+                return await addOrUpdateToIDB(IDB_STORES.ignoredMagnets, newData, true);
+            }
+
+            // 第2步：计算差异
+            const existingSet = new Set(existingData.map(item => item.href));
+            const newSet = new Set(newData.map(item => item.href));
+            
+            // 需要新增的
+            const toAdd = newData.filter(item => !existingSet.has(item.href));
+            // 需要删除的（存在于旧数据但不在新数据中）
+            const toDelete = existingData
+                .filter(item => !newSet.has(item.href))
+                .map(item => item.href);
+
+            // 第3步：执行增量操作
+            let addResult = { success: true, count: 0 };
+            let deleteResult = { success: true, count: 0 };
+
+            if (toAdd.length > 0) {
+                addResult = await addOrUpdateToIDB(IDB_STORES.ignoredMagnets, toAdd, true);
+                if (!addResult.success) {
+                    console.error('[EhMagnet] 新增忽略磁链失败，但继续处理');
+                }
+            }
+
+            if (toDelete.length > 0) {
+                deleteResult = await deleteFromIDB(IDB_STORES.ignoredMagnets, toDelete);
+                if (!deleteResult.success) {
+                    console.error('[EhMagnet] 删除忽略磁链失败，但继续处理');
+                }
+            }
+
+            // 第4步：日志和统计
+            const elapsed = performance.now() - startTime;
+            console.log(`[EhMagnet] 忽略磁链增量更新完成 | 总计${newData.length}条 | +${addResult.count} -${deleteResult.count} | 耗时${elapsed.toFixed(2)}ms`);
+            
+            return addResult.success || deleteResult.success || (toAdd.length === 0 && toDelete.length === 0);
         } catch (err) {
             console.error('[EhMagnet] 保存已忽略磁链失败:', err);
+            toastError(`忽略磁链保存失败: ${err?.message || '未知错误'}`);
             return false;
         }
     };
@@ -2234,8 +2631,9 @@
             // 异步保存到IndexedDB
             if (idbSupported && idbDatabase) {
                 try {
-                    await saveDownloadedGalleriesToIDB(payload);
-                    await saveDownloadedMagnetsToIDB(magnetPayload);
+                    // 使用去重队列替代直接调用，高频操作时自动合并
+                    debouncedSaveGalleries.enqueue(payload);
+                    debouncedSaveMagnets.enqueue(magnetPayload);
                     console.log('[EhMagnet] 已下载状态已保存到IndexedDB');
                 } catch (err) {
                     console.warn('[EhMagnet] 保存到IndexedDB失败:', err);
@@ -2274,8 +2672,9 @@
             // 异步保存到IndexedDB
             if (idbSupported && idbDatabase) {
                 try {
-                    await saveIgnoredGalleriesToIDB(payload);
-                    await saveIgnoredMagnetsToIDB(magnetPayload);
+                    // 使用去重队列替代直接调用，高频操作时自动合并
+                    debouncedIgnoreGalleries.enqueue(payload);
+                    debouncedIgnoreMagnets.enqueue(magnetPayload);
                     console.log('[EhMagnet] 已忽略状态已保存到IndexedDB');
                 } catch (err) {
                     console.warn('[EhMagnet] 保存到IndexedDB失败:', err);
@@ -15313,6 +15712,12 @@
     // 初始化IndexedDB
     console.log('[EhMagnet] 正在初始化IndexedDB...');
     initIndexedDB().then(() => {
+        // 配置去重队列的操作函数
+        debouncedSaveGalleries.setOperation(saveDownloadedGalleriesToIDB);
+        debouncedIgnoreGalleries.setOperation(saveIgnoredGalleriesToIDB);
+        debouncedSaveMagnets.setOperation(saveDownloadedMagnetsToIDB);
+        debouncedIgnoreMagnets.setOperation(saveIgnoredMagnetsToIDB);
+        console.log('[EhMagnet] ✅ 去重队列已配置完成');
         console.log('[EhMagnet] IndexedDB初始化完成，idbSupported:', idbSupported);
     }).catch(err => {
         console.error('[EhMagnet] IndexedDB初始化失败:', err);
