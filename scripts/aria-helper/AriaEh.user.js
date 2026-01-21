@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhAria2下载助手
 // @namespace    com.xioxin.AriaEh
-// @version      1.3
+// @version      1.3.1
 // @description  发送任务到Aria2,并查看下载进度
 // @author       xioxin, SchneeHertz, AkiraShe
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -464,7 +464,7 @@ class AriaClientLite {
             opt.onload = resolve;
             GM_xmlhttpRequest({
                 url,
-                timeout: 2000,
+                timeout: 5000,
                 responseType: 'json',
                 ...opt
             });
@@ -984,7 +984,7 @@ const AriaEhBridge = {
             const task = tasks[i] || {};
             try {
                 let target = null;
-                let extraOptions = null;
+                let extraOptions = task.extraOptions || null;  // 【修复】从task中提取extraOptions
                 let archiveMeta = null;
                 if (task.archive) {
                     const archive = task.archive || {};
