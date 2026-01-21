@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.2.0
+// @version      2.2.1
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
@@ -7018,15 +7018,24 @@
                                     console.log(`    ✓ 匹配磁力链接`);
                                     return true;
                                 }
+                                // 提取磁链中的infohash与种链hash进行比对
+                                const inputHash = item.value.match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                                const torrentHash = entryTorrent.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                                const downloadHash = entryUrl.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                                if (inputHash && (inputHash === torrentHash || inputHash === downloadHash)) {
+                                    console.log(`    ✓ 匹配磁链infohash`);
+                                    return true;
+                                }
                             }
                             if (item.type === 'url') {
                                 // 种子链接：提取hash部分进行比对
                                 const inputHash = item.value.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
                                 const torrentHash = entryTorrent.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
                                 const downloadHash = entryUrl.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                                const entryMagnetHash = entryMagnet.match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
                                 
-                                if (inputHash && (inputHash === torrentHash || inputHash === downloadHash)) {
-                                    console.log(`    ✓ 匹配URL (hash: ${inputHash})`);
+                                if (inputHash && (inputHash === torrentHash || inputHash === downloadHash || inputHash === entryMagnetHash)) {
+                                    console.log(`    ✓ 匹配URL/磁链 (hash: ${inputHash})`);
                                     return true;
                                 }
                                 
@@ -7084,15 +7093,28 @@
                             entryIndex = allEntries.findIndex(e => String(e.gallery?.gid) === String(value));
                             console.log(`[批量查询] 用户输入重复的GID: ${value}, 出现${count}次`);
                         } else if (item.type === 'magnet') {
+                            // 磁链完全匹配
                             entryIndex = allEntries.findIndex(e => e.magnet === value);
+                            // 如果没有完全匹配，尝试通过infohash匹配
+                            if (entryIndex < 0) {
+                                const inputHash = value.match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                                if (inputHash) {
+                                    entryIndex = allEntries.findIndex(e => {
+                                        const torrentHash = (e.torrentHref || '').match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                                        const magnetHash = (e.magnet || '').match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                                        return inputHash === torrentHash || inputHash === magnetHash;
+                                    });
+                                }
+                            }
                             console.log(`[批量查询] 用户输入重复的磁链: ${value}, 出现${count}次`);
                         } else if (item.type === 'url') {
-                            // 对于URL类型，通过hash匹配
+                            // 对于URL类型，通过hash匹配（支持与磁链跨匹配）
                             const inputHash = value.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
                             entryIndex = allEntries.findIndex(e => {
                                 const entryTorrent = e.torrentHref || '';
                                 const torrentHash = entryTorrent.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
-                                return inputHash && inputHash === torrentHash;
+                                const magnetHash = (e.magnet || '').match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                                return inputHash && (inputHash === torrentHash || inputHash === magnetHash);
                             });
                             console.log(`[批量查询] 用户输入重复的URL: ${value.substring(0, 50)}..., 出现${count}次`);
                         }
@@ -7303,12 +7325,24 @@
 
                 console.log('[批量查询] 匹配结果数:', allEntries.length);
                 
-                // 调试：输出未找到的磁链
+                // 调试：输出未找到的磁链（支持infohash匹配）
                 if (magnetItems.length > 0) {
-                    const matchedMagnets = allEntries
-                        .map(e => e.magnet)
-                        .filter(m => m);
-                    const unfoundMagnets = magnetItems.filter(item => !matchedMagnets.includes(item.value));
+                    const unfoundMagnets = magnetItems.filter(item => {
+                        // 尝试完全匹配
+                        if (allEntries.some(e => e.magnet === item.value)) {
+                            return false;
+                        }
+                        // 尝试通过infohash匹配
+                        const inputHash = item.value.match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                        if (inputHash) {
+                            return !allEntries.some(e => {
+                                const torrentHash = (e.torrentHref || '').match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                                const magnetHash = (e.magnet || '').match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                                return inputHash === torrentHash || inputHash === magnetHash;
+                            });
+                        }
+                        return true;
+                    });
                     if (unfoundMagnets.length > 0) {
                         console.log(`[批量查询] 未找到的磁链 (${unfoundMagnets.length} 条):`);
                         unfoundMagnets.forEach((item, idx) => {
@@ -7328,10 +7362,19 @@
                 
                 // 计算已找到的值（gID和磁链都要考虑，只考虑有效项）
                 const foundValues = new Set();
+                const foundHashes = new Set(); // 用于存放infohash便于匹配
                 validEntries.forEach(entry => {
                     // 收集所有找到的值
                     if (entry.gallery?.gid) foundValues.add(String(entry.gallery.gid));
-                    if (entry.magnet) foundValues.add(entry.magnet);
+                    if (entry.magnet) {
+                        foundValues.add(entry.magnet);
+                        const hash = entry.magnet.match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                        if (hash) foundHashes.add(hash);
+                    }
+                    if (entry.torrentHref) {
+                        const hash = entry.torrentHref.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                        if (hash) foundHashes.add(hash);
+                    }
                 });
                 
                 // 计算被尝试查询过的项（无论成功失败）
@@ -7340,8 +7383,22 @@
                     if (entry.gallery?.gid) queriedValues.add(String(entry.gallery.gid));
                 });
                 
-                // 未查询到的项 = 查询项 - 已找到的值 - 被尝试查询过的值
-                let unfoundItems = queryItems.filter(item => !foundValues.has(item.value) && !queriedValues.has(item.value));
+                // 未查询到的项 = 查询项 - 已找到的值 - 被尝试查询过的值（支持infohash匹配）
+                let unfoundItems = queryItems.filter(item => {
+                    // 检查完全匹配
+                    if (foundValues.has(item.value) || queriedValues.has(item.value)) {
+                        return false;
+                    }
+                    // 检查infohash匹配
+                    if (item.type === 'magnet') {
+                        const hash = item.value.match(/urn:btih:([a-f0-9]{40})/i)?.[1]?.toLowerCase();
+                        if (hash && foundHashes.has(hash)) return false;
+                    } else if (item.type === 'url') {
+                        const hash = item.value.match(/[a-f0-9]{40}/i)?.[0]?.toLowerCase();
+                        if (hash && foundHashes.has(hash)) return false;
+                    }
+                    return true;
+                });
                 
                 // 对未查询到的项进行去重和计数
                 const unfoundMap = new Map(); // value => { item, count }
