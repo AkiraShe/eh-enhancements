@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.3.0
+// @version      2.3.1
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
 // @match        *://exhentai.org/*
 // @grant        GM_xmlhttpRequest
+// @connect      hath.network
+// @connect      *.hath.network
 // @license      MIT
 // @homepage     https://github.com/AkiraShe/eh-enhancements
 // ==/UserScript==
@@ -15478,21 +15480,25 @@
                     clearTimeout(submenuTimeout);
                     // 计算二级菜单位置（fixed 定位，相对视口）
                     const rect = item.getBoundingClientRect();
-                    const viewportWidth = window.innerWidth;
                     
                     // 获取二级菜单的父菜单位置，用于计算二级菜单展开方向
                     const parentMenu = menu;
                     const parentRect = parentMenu.getBoundingClientRect();
                     
-                    // 判断是否有足够空间向左展开
+                    // 【修改】优先向右展开（与三角符号一致），只在右边空间不足时才向左展开
+                    const viewportWidth = window.innerWidth;
+                    const hasSpaceOnRight = (parentRect.right + 220) < viewportWidth;
                     const hasSpaceOnLeft = parentRect.left > 220;
                     
-                    if (hasSpaceOnLeft) {
-                        // 左边有足够空间，二级菜单向左展开
+                    if (hasSpaceOnRight) {
+                        // 右边有足够空间，二级菜单向右展开（默认）
+                        submenu.style.left = (parentRect.right + 4) + 'px';  // 父菜单右边 + 间隔
+                    } else if (hasSpaceOnLeft) {
+                        // 右边空间不足但左边有足够空间，二级菜单向左展开
                         submenu.style.left = (parentRect.left - 210) + 'px';  // 父菜单左边 - 二级菜单宽度 - 间隔
                     } else {
-                        // 左边空间不足，二级菜单向右展开
-                        submenu.style.left = (parentRect.right + 4) + 'px';  // 父菜单右边 + 间隔
+                        // 两边空间都不足，优先向右（会超出边界）
+                        submenu.style.left = (parentRect.right + 4) + 'px';
                     }
                     
                     // 二级菜单顶部对齐当前菜单项
