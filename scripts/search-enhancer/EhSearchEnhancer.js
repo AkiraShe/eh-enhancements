@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.2.1
+// @version      2.3.0
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
 // @match        *://exhentai.org/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
 // @license      MIT
 // @homepage     https://github.com/AkiraShe/eh-enhancements
 // ==/UserScript==
@@ -734,7 +734,17 @@
         }
     };
 
-    const getAriaEhAPI = () => (typeof window !== 'undefined' ? window.AriaEhAPI : null);
+    const getAriaEhAPI = () => {
+        // 先尝试从unsafeWindow获取（Tampermonkey需要）
+        if (typeof unsafeWindow !== 'undefined' && unsafeWindow.AriaEhAPI) {
+            return unsafeWindow.AriaEhAPI;
+        }
+        // 再尝试从window获取
+        if (typeof window !== 'undefined' && window.AriaEhAPI) {
+            return window.AriaEhAPI;
+        }
+        return null;
+    };
 
     const isAriaEhBridgeAvailable = () => {
         const api = getAriaEhAPI();
@@ -6633,6 +6643,21 @@
         sendToAria2Btn.style.cssText = buttonBaseStyle + `
             background: #1890FF;
         `;
+        
+        // 【新增】检测EhAria2是否可用并置灰
+        const ariaAvailable = isAriaEhBridgeAvailable();
+        const ariaConfigured = ariaAvailable && isAriaEhBridgeConfigured();
+        if (!ariaAvailable || !ariaConfigured) {
+            sendToAria2Btn.disabled = true;
+            sendToAria2Btn.style.opacity = '0.5';
+            sendToAria2Btn.style.cursor = 'not-allowed';
+            if (!ariaAvailable) {
+                sendToAria2Btn.title = 'EhAria2下载助手未安装或未加载';
+            } else {
+                sendToAria2Btn.title = 'EhAria2下载助手未配置';
+            }
+        }
+        
         sendToAria2Btn.addEventListener('click', async () => {
             // 【修复】使用与AB DM相同的逻辑获取选中项
             const checkboxes = resultContainer.querySelectorAll('input[type="checkbox"]:checked:not([data-select-all])');
@@ -7656,6 +7681,40 @@
                 try {
                     await sendToAbdm(downloadItems);
                     toastSuccess(`成功发送 ${successCount} 条记录到AB DM${failureCount > 0 ? `（${failureCount} 条失败）` : ''}`);
+                    
+                    // 【新增】标记这些画廊为已下载，并取消勾选
+                    for (const item of readyItems) {
+                        if (item.gid) {
+                            console.log(`[performBatchVerification] 标记 GID ${item.gid} 为已下载`);
+                            
+                            // 【重要】使用 markGalleryDownloaded() 函数，这样会同时：
+                            // 1. 更新内存中的已下载状态
+                            // 2. 持久化到IndexedDB
+                            // 3. 立即调用 updateStatusFlags() 更新所有UI
+                            if (typeof markGalleryDownloaded === 'function') {
+                                markGalleryDownloaded({ gid: String(item.gid) });
+                                console.log(`[performBatchVerification] 使用markGalleryDownloaded标记GID ${item.gid}`);
+                            }
+                            
+                            // 取消勾选对话框中的复选框
+                            if (item._checkbox) {
+                                item._checkbox.checked = false;
+                                selectedGalleries.delete(item.gid);
+                                console.log(`[performBatchVerification] 取消勾选对话框中 GID ${item.gid} 的复选框`);
+                            }
+                            
+                            // 【重要】同时取消勾选页面上所有该GID的复选框（画廊级别的复选框）
+                            const pageCheckboxes = document.querySelectorAll(`.eh-magnet-checkbox[data-gallery-gid="${item.gid}"]`);
+                            pageCheckboxes.forEach((checkbox) => {
+                                checkbox.checked = false;
+                                selectedMagnets.delete(checkbox.dataset.magnetValue);
+                                console.log(`[performBatchVerification] 取消勾选页面中 GID ${item.gid} 的复选框`);
+                            });
+                        }
+                    }
+                    
+                    console.log(`[performBatchVerification] 已将 ${readyItems.length} 个画廊标记为已下载并取消勾选`);
+                    
                     dialog.remove();
                 } catch (err) {
                     console.warn('发送到 AB DM 失败:', err);
@@ -8184,6 +8243,91 @@
         }
     };
 
+    // 用于控制验证的取消信号
+    let verifyLinkCancelled = false;
+    
+    // 验证下载链接是否真正准备好（使用 GM_xmlhttpRequest）
+    const verifyDownloadLinkReady = async (downloadUrl, maxRetries = 3) => {
+        console.log(`[verifyLink] 开始验证下载链接: ${downloadUrl}`);
+        verifyLinkCancelled = false;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            // 检查是否被取消
+            if (verifyLinkCancelled) {
+                console.log(`[verifyLink] 验证已被取消（第${attempt}次尝试时）`);
+                return { ready: false, cancelled: true, attempt };
+            }
+            
+            const result = await new Promise((resolve) => {
+                if (typeof GM_xmlhttpRequest === 'undefined') {
+                    console.warn('[verifyLink] GM_xmlhttpRequest 不可用，使用降级方案');
+                    resolve({ ready: true, method: 'fallback', attempt });
+                    return;
+                }
+
+                GM_xmlhttpRequest({
+                    method: 'HEAD',
+                    url: downloadUrl,
+                    timeout: 10000,
+                    headers: {
+                        'User-Agent': navigator.userAgent
+                    },
+                    onload: function(response) {
+                        const responseHeaders = response.responseHeaders || '';
+                        const contentType = responseHeaders.match(/[Cc]ontent-[Tt]ype:\s*([^\n]+)/)?.[1] || '';
+                        const contentLength = responseHeaders.match(/[Cc]ontent-[Ll]ength:\s*(\d+)/)?.[1] || '0';
+                        
+                        console.log(`[verifyLink] 尝试 ${attempt}/${maxRetries}: Type=${contentType.split(';')[0]}, Size=${parseInt(contentLength)} bytes`);
+                        
+                        // 检查是否是有效的压缩包
+                        const isZip = contentType.toLowerCase().includes('zip') || 
+                                     contentType.toLowerCase().includes('octet-stream');
+                        const size = parseInt(contentLength);
+                        const hasRealSize = size > 500000; // 至少500KB
+                        
+                        if (isZip && hasRealSize) {
+                            console.log(`[verifyLink] ✓ 文件准备好（第${attempt}次尝试）`);
+                            resolve({ ready: true, attempt, reason: '压缩包已准备', size });
+                        } else if (contentType.toLowerCase().includes('text/html') || size < 100000) {
+                            // HTML 页面或文件太小，说明还在等待，返回 waiting 标记
+                            console.log(`[verifyLink] ⏳ 还在等待，${attempt}/${maxRetries}...`);
+                            resolve({ ready: false, waiting: true, attempt, reason: '文件还在准备' });
+                        } else {
+                            // 响应成功且有内容
+                            console.log(`[verifyLink] ✓ 文件似乎准备好（第${attempt}次尝试）`);
+                            resolve({ ready: true, attempt, reason: '响应正常', size });
+                        }
+                    },
+                    onerror: function(error) {
+                        console.log(`[verifyLink] 请求出错（第${attempt}次尝试）: ${error}`);
+                        resolve({ ready: false, waiting: true, attempt, reason: '请求出错，将重试' });
+                    },
+                    ontimeout: function() {
+                        console.log(`[verifyLink] 请求超时（第${attempt}次尝试）`);
+                        resolve({ ready: false, waiting: true, attempt, reason: '请求超时，将重试' });
+                    }
+                });
+            });
+            
+            // 如果文件准备好，立即返回
+            if (result.ready) {
+                return result;
+            }
+            
+            // 如果达到最大重试次数，放行（让AB DM处理）
+            if (attempt === maxRetries) {
+                console.log(`[verifyLink] 达到最大重试次数，放行链接给AB DM处理`);
+                return { ready: true, attempt, reason: '达到最大重试次数', allowAnyway: true };
+            }
+            
+            // 如果还在等待，继续下一轮重试
+            if (result.waiting) {
+                console.log(`[verifyLink] 等待 1 秒后进行第 ${attempt + 1} 次尝试...`);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+    };
+
     const performBatchVerification = async (entries, container, confirmBtn, verificationState) => {
         const indicators = container.querySelectorAll('.archive-status-indicator');
         const statusTexts = container.querySelectorAll('span[style*="min-width: 100px"]');
@@ -8221,12 +8365,74 @@
                     entry._verifyInfo = verifyResult;
                     // 保存下载链接用于后续刷新使用（仅在当前会话有效）
                     entry._downloadUrl = triggerResult.downloadUrl;
+                    
+                    // 【新增】即使立即准备好，也要进行链接真实性验证
+                    console.log(`[performBatchVerification] GID ${entry.gallery.gid} 进行下载链接真实性验证...`);
+                    statusText.textContent = '验证链接中...';
+                    statusText.style.color = '#FF9800';
+                    
+                    // 构建完整的下载URL（可能已经是完整URL或相对路径）
+                    let fullDownloadUrl = triggerResult.downloadUrl;
+                    if (!fullDownloadUrl.startsWith('http')) {
+                        // 如果是相对路径，需要加上域名和?start=1
+                        fullDownloadUrl = `${fullDownloadUrl}?start=1`;
+                    } else if (!fullDownloadUrl.includes('?start=1')) {
+                        // 如果已经是完整URL但没有?start=1，添加参数
+                        fullDownloadUrl = `${fullDownloadUrl}?start=1`;
+                    }
+                    
+                    const linkVerification = await verifyDownloadLinkReady(fullDownloadUrl);
+                    
+                    if (!linkVerification.ready) {
+                        console.warn(`[performBatchVerification] GID ${entry.gallery.gid} 链接验证未通过: ${linkVerification.reason}`);
+                        verifyResult.linkVerifyResult = linkVerification;
+                        verifyResult.linkVerifyWarning = `链接验证未通过 (${linkVerification.reason})`;
+                        // 【重要】如果链接验证失败，更新状态为 'waiting'，这样就不会自动发送
+                        entry._verifyStatus = 'waiting';
+                        verifyResult.status = 'waiting';
+                        console.log(`[performBatchVerification] 更新 GID ${entry.gallery.gid} 状态为 'waiting'，不会自动发送`);
+                    } else {
+                        console.log(`[performBatchVerification] GID ${entry.gallery.gid} 链接验证通过（${linkVerification.attempt}次尝试）`);
+                        verifyResult.linkVerifyResult = linkVerification;
+                    }
                 } else {
                     // 第二步：验证生成状态（如果还未完成）
                     console.log(`[performBatchVerification] 开始验证 GID ${entry.gallery.gid}...`);
                     verifyResult = await verifyArchiveLink(entry.gallery.gid, entry.gallery.token);
                     entry._verifyStatus = verifyResult.status;
                     entry._verifyInfo = verifyResult;
+                    
+                    // 【新增】如果获得了下载链接，进行真实性验证
+                    if (verifyResult.downloadUrl && verifyResult.status === 'ready') {
+                        console.log(`[performBatchVerification] GID ${entry.gallery.gid} 进行下载链接真实性验证...`);
+                        statusText.textContent = '验证链接中...';
+                        statusText.style.color = '#FF9800';
+                        
+                        // 构建完整的下载URL（可能已经是完整URL或相对路径）
+                        let fullDownloadUrl = verifyResult.downloadUrl;
+                        if (!fullDownloadUrl.startsWith('http')) {
+                            // 如果是相对路径，需要加上域名和?start=1
+                            fullDownloadUrl = `${fullDownloadUrl}?start=1`;
+                        } else if (!fullDownloadUrl.includes('?start=1')) {
+                            // 如果已经是完整URL但没有?start=1，添加参数
+                            fullDownloadUrl = `${fullDownloadUrl}?start=1`;
+                        }
+                        
+                        const linkVerification = await verifyDownloadLinkReady(fullDownloadUrl);
+                        
+                        if (!linkVerification.ready) {
+                            console.warn(`[performBatchVerification] GID ${entry.gallery.gid} 链接验证未通过: ${linkVerification.reason}`);
+                            verifyResult.linkVerifyResult = linkVerification;
+                            verifyResult.linkVerifyWarning = `链接验证未通过 (${linkVerification.reason})`;
+                            // 【重要】如果链接验证失败，更新状态为 'waiting'，这样就不会自动发送
+                            entry._verifyStatus = 'waiting';
+                            verifyResult.status = 'waiting';
+                            console.log(`[performBatchVerification] 更新 GID ${entry.gallery.gid} 状态为 'waiting'，不会自动发送`);
+                        } else {
+                            console.log(`[performBatchVerification] GID ${entry.gallery.gid} 链接验证通过（${linkVerification.attempt}次尝试）`);
+                            verifyResult.linkVerifyResult = linkVerification;
+                        }
+                    }
 
                     // 如果还没准备好，等待一段时间后重新验证（最多重试 5 次）
                     if (verifyResult.status !== 'ready') {
@@ -8431,6 +8637,9 @@
             checkbox.dataset.token = entry.gallery?.token || '';
             checkbox.style.marginTop = '0';
             checkbox.style.flexShrink = '0';
+            
+            // 【新增】保存复选框引用到 entry 对象，供后续使用（如标记已下载后取消勾选）
+            entry._checkbox = checkbox;
             
             // 特别处理"未知"项（无效查询结果）
             if (entry.name === '未知') {
@@ -10216,17 +10425,12 @@
             });
             if (!shouldSelect) return;
 
-            const sorted = groupBoxes
-                .map((box) => ({
-                    box,
-                    timestamp: Number(box.dataset.magnetTimestamp || '0'),
-                }))
-                .sort((a, b) => b.timestamp - a.timestamp);
+            // 【修复】按DOM顺序（即calculateMagnetScoreGlobal的排序）选择第一个有效项，而不是按时间戳重新排序
+            // 这样与磁链列表的显示顺序保持一致
+            const targetBox = groupBoxes.find((box) => !shouldSkipSelectionForBox(box));
 
-            const targetEntry = sorted.find(({ box }) => !shouldSkipSelectionForBox(box));
-
-            if (!targetEntry) return;
-            targetEntry.box.checked = true;
+            if (!targetBox) return;
+            targetBox.checked = true;
         });
 
         rebuildSelectionSets();
@@ -13158,6 +13362,591 @@
         });
     };
 
+    // 获取画廊的完整信息，包括页数
+    const getGalleryInfo = (gid) => {
+        if (!gid) return null;
+        const gidStr = String(gid);
+        
+        // 查找画廊容器（.gl1t 是搜索结果条目）
+        const galleryLink = document.querySelector(`a[href*="/g/${gidStr}/"]`);
+        if (!galleryLink) return null;
+        
+        // 向上查找到 .gl1t 容器
+        let gl1tElement = galleryLink;
+        while (gl1tElement && !gl1tElement.classList?.contains?.('gl1t')) {
+            gl1tElement = gl1tElement.parentElement;
+            if (!gl1tElement) break;
+        }
+        
+        if (!gl1tElement) return null;
+        
+        // 提取标题
+        let title = gl1tElement.textContent.trim() || '';
+        if (!title) {
+            const titleEl = gl1tElement.querySelector('a');
+            if (titleEl) title = titleEl.textContent.trim();
+        }
+        
+        // 提取页数：在 .gl5t 中查找 "XX pages" 或 "XX 页" 的文本
+        let pages = '';
+        const gl5tElement = gl1tElement.querySelector('.gl5t');
+        if (gl5tElement) {
+            const allDivs = gl5tElement.querySelectorAll(':scope > div > div');
+            for (const div of allDivs) {
+                const text = div.textContent.trim();
+                // 查找格式为 "50 pages" 或 "50 page" 或 "50 页" 的文本
+                if (/^\d+\s+(pages?|页)$/i.test(text)) {
+                    const match = text.match(/(\d+)\s+(pages?|页)/i);
+                    if (match) {
+                        pages = match[1];
+                        break;
+                    }
+                }
+            }
+        }
+        
+        return {
+            gid: gidStr,
+            title: title,
+            pages: pages || '?',
+        };
+    };
+
+    // 显示重名画廊对话框（右侧浮窗，用于导出）
+    const showDuplicateHandlerDialog = (allDuplicates, userSelectedIndices) => {
+        return new Promise((resolve) => {
+            // 创建右侧浮窗容器（缩窄至150px，与导入对话框保持一致）
+            const floatingWindow = document.createElement('div');
+            floatingWindow.className = 'eh-duplicate-handler-window';
+            floatingWindow.style.cssText = `
+                position: fixed;
+                right: 20px;
+                top: 50%;
+                transform: translateY(-50%);
+                width: 150px;
+                max-height: 80vh;
+                background: rgba(255, 255, 255, 0.88);
+                border: 1px solid #ccc;
+                border-radius: 6px;
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+                z-index: 10001;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            `;
+            
+            // 标题栏（使用简洁风格，类似发送下载）
+            const header = document.createElement('div');
+            header.style.cssText = `
+                padding: 8px 10px;
+                background: #f0f0f0;
+                color: #333;
+                font-weight: bold;
+                font-size: 12px;
+                border-bottom: 1px solid #ddd;
+                word-break: break-word;
+                line-height: 1.3;
+            `;
+            header.textContent = '检测到重名画廊';
+            floatingWindow.appendChild(header);
+            
+            // 内容区域
+            const content = document.createElement('div');
+            content.style.cssText = `
+                flex: 1;
+                overflow-y: auto;
+                padding: 8px;
+            `;
+            
+            // 存储用户选择状态（默认选中所有用户已勾选的项）
+            const userSelections = new Map();
+            allDuplicates.forEach((group, groupIdx) => {
+                const selectedIndices = userSelectedIndices?.get(groupIdx) || [0];
+                userSelections.set(groupIdx, selectedIndices);
+            });
+            
+            // 全选复选框
+            const selectAllDiv = document.createElement('div');
+            selectAllDiv.style.cssText = `
+                padding: 4px 0;
+                margin-bottom: 6px;
+                border-bottom: 1px solid #ddd;
+                display: flex;
+                align-items: center;
+            `;
+            const selectAllCheckbox = document.createElement('input');
+            selectAllCheckbox.type = 'checkbox';
+            selectAllCheckbox.style.cssText = `
+                margin-right: 4px;
+                cursor: pointer;
+                flex-shrink: 0;
+            `;
+            const selectAllLabel = document.createElement('label');
+            selectAllLabel.style.cssText = `
+                cursor: pointer;
+                font-size: 10px;
+                font-weight: bold;
+                color: #333;
+                word-break: break-word;
+            `;
+            selectAllLabel.textContent = '全选';
+            selectAllLabel.style.marginLeft = '2px';
+            selectAllDiv.appendChild(selectAllCheckbox);
+            selectAllDiv.appendChild(selectAllLabel);
+            content.appendChild(selectAllDiv);
+            
+            // 生成重名组展示
+            const checkboxRefs = []; // 保存所有复选框引用，用于全选
+            allDuplicates.forEach((group, groupIdx) => {
+                const groupDiv = document.createElement('div');
+                groupDiv.style.cssText = `
+                    margin-bottom: 8px;
+                    padding: 6px;
+                    background: #fafafa;
+                    border-radius: 3px;
+                    border-left: 2px solid #999;
+                `;
+                
+                // 标题（支持多行）
+                const titleDiv = document.createElement('div');
+                titleDiv.style.cssText = `
+                    font-weight: bold;
+                    font-size: 10px;
+                    margin-bottom: 4px;
+                    color: #333;
+                    word-break: break-word;
+                    white-space: pre-wrap;
+                    line-height: 1.3;
+                `;
+                titleDiv.textContent = group[0].title;
+                groupDiv.appendChild(titleDiv);
+                
+                // 画廊列表
+                group.forEach((item, itemIdx) => {
+                    const itemDiv = document.createElement('div');
+                    itemDiv.style.cssText = `
+                        display: flex;
+                        align-items: center;
+                        padding: 2px 0;
+                        font-size: 10px;
+                    `;
+                    
+                    // 复选框
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.style.cssText = `
+                        margin-right: 3px;
+                        cursor: pointer;
+                        flex-shrink: 0;
+                    `;
+                    
+                    // 检查是否应该默认选中
+                    const selectedIndices = userSelections.get(groupIdx) || [];
+                    checkbox.checked = selectedIndices.includes(itemIdx);
+                    
+                    checkbox.addEventListener('change', () => {
+                        const selections = userSelections.get(groupIdx) || [];
+                        if (checkbox.checked) {
+                            if (!selections.includes(itemIdx)) {
+                                selections.push(itemIdx);
+                            }
+                        } else {
+                            const idx = selections.indexOf(itemIdx);
+                            if (idx > -1) selections.splice(idx, 1);
+                        }
+                        userSelections.set(groupIdx, selections);
+                        
+                        // 更新全选状态
+                        const allChecked = checkboxRefs.every(cb => cb.checked);
+                        selectAllCheckbox.checked = allChecked;
+                    });
+                    
+                    checkboxRefs.push(checkbox);
+                    itemDiv.appendChild(checkbox);
+                    
+                    // 页数显示（可点击跳转）
+                    const pageText = document.createElement('span');
+                    pageText.style.cssText = `
+                        flex: 1;
+                        color: #666;
+                        cursor: pointer;
+                        user-select: none;
+                        font-size: 9px;
+                        word-break: break-word;
+                    `;
+                    pageText.textContent = `[${itemIdx + 1}] ${item.pages}p`;
+                    
+                    pageText.addEventListener('mouseenter', () => {
+                        pageText.style.background = '#e0e0e0';
+                        pageText.style.borderRadius = '2px';
+                    });
+                    pageText.addEventListener('mouseleave', () => {
+                        pageText.style.background = 'transparent';
+                    });
+                    pageText.addEventListener('click', () => {
+                        jumpToGallery(item.gid);
+                        highlightGallery(item.gid);
+                    });
+                    
+                    itemDiv.appendChild(pageText);
+                    groupDiv.appendChild(itemDiv);
+                });
+                
+                content.appendChild(groupDiv);
+            });
+            
+            selectAllCheckbox.addEventListener('change', () => {
+                checkboxRefs.forEach((cb, cbIdx) => {
+                    const oldChecked = cb.checked;
+                    cb.checked = selectAllCheckbox.checked;
+                    
+                    // 找到这个复选框对应的 groupIdx 和 itemIdx
+                    let currentIdx = 0;
+                    for (let gIdx = 0; gIdx < allDuplicates.length; gIdx++) {
+                        for (let iIdx = 0; iIdx < allDuplicates[gIdx].length; iIdx++) {
+                            if (currentIdx === cbIdx) {
+                                const selections = userSelections.get(gIdx) || [];
+                                if (selectAllCheckbox.checked && !selections.includes(iIdx)) {
+                                    selections.push(iIdx);
+                                } else if (!selectAllCheckbox.checked) {
+                                    const idx = selections.indexOf(iIdx);
+                                    if (idx > -1) selections.splice(idx, 1);
+                                }
+                                userSelections.set(gIdx, selections);
+                                break;
+                            }
+                            currentIdx++;
+                        }
+                    }
+                });
+            });
+            
+            floatingWindow.appendChild(content);
+            
+            // 底部按钮
+            const footer = document.createElement('div');
+            footer.style.cssText = `
+                padding: 8px;
+                border-top: 1px solid #ddd;
+                display: flex;
+                gap: 6px;
+                background: #f9f9f9;
+            `;
+            
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '取消';
+            cancelBtn.style.cssText = `
+                flex: 1;
+                padding: 6px;
+                background: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                cursor: pointer;
+                font-size: 10px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                line-height: 1.2;
+            `;
+            cancelBtn.onclick = () => {
+                floatingWindow.remove();
+                resolve(null);
+            };
+            
+            const confirmBtn = document.createElement('button');
+            confirmBtn.textContent = '确定';
+            confirmBtn.style.cssText = `
+                flex: 1;
+                padding: 6px;
+                background: #667eea;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                cursor: pointer;
+                font-size: 10px;
+                font-weight: bold;
+                white-space: pre-wrap;
+                word-break: break-word;
+                line-height: 1.2;
+            `;
+            confirmBtn.onclick = () => {
+                floatingWindow.remove();
+                resolve(userSelections);
+            };
+            
+            footer.appendChild(cancelBtn);
+            footer.appendChild(confirmBtn);
+            floatingWindow.appendChild(footer);
+            
+            document.body.appendChild(floatingWindow);
+        });
+    };
+
+    // 显示重名画廊对话框（旧版本，保留用于导入）
+    const showDuplicateGalleriesDialog = (title, galleryList) => {
+        return new Promise((resolve) => {
+            // 创建模态背景
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 10001;
+            `;
+            
+            // 创建对话框
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: rgba(255, 255, 255, 0.95);
+                border-radius: 8px;
+                padding: 20px;
+                max-width: 500px;
+                max-height: 70vh;
+                overflow-y: auto;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            `;
+            
+            // 标题
+            const titleDiv = document.createElement('div');
+            titleDiv.style.cssText = `
+                font-size: 16px;
+                font-weight: bold;
+                margin-bottom: 15px;
+                color: #333;
+            `;
+            titleDiv.textContent = '检测到重名画廊';
+            dialog.appendChild(titleDiv);
+            
+            // 画廊标题（可复制）
+            const galleryTitleDiv = document.createElement('div');
+            galleryTitleDiv.style.cssText = `
+                background: #f5f5f5;
+                padding: 10px;
+                border-radius: 4px;
+                margin-bottom: 15px;
+                word-break: break-all;
+                user-select: text;
+                font-size: 13px;
+                color: #666;
+            `;
+            galleryTitleDiv.textContent = title;
+            dialog.appendChild(galleryTitleDiv);
+            
+            // 重名数量说明
+            const countDiv = document.createElement('div');
+            countDiv.style.cssText = `
+                font-size: 13px;
+                color: #666;
+                margin-bottom: 12px;
+                padding-bottom: 10px;
+                border-bottom: 1px solid #ddd;
+            `;
+            countDiv.textContent = `共检测到 ${galleryList.length} 个同名画廊`;
+            dialog.appendChild(countDiv);
+            
+            // 画廊列表表格
+            const table = document.createElement('table');
+            table.style.cssText = `
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+                margin-bottom: 15px;
+            `;
+            
+            // 表头
+            const thead = document.createElement('thead');
+            const headerRow = document.createElement('tr');
+            headerRow.style.cssText = `
+                background: #f9f9f9;
+                border-bottom: 1px solid #ddd;
+            `;
+            
+            ['序号', '页数', '状态'].forEach(text => {
+                const th = document.createElement('th');
+                th.style.cssText = `
+                    padding: 8px;
+                    text-align: left;
+                    font-weight: bold;
+                    color: #333;
+                    border: 1px solid #ddd;
+                `;
+                th.textContent = text;
+                headerRow.appendChild(th);
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+            
+            // 表体
+            const tbody = document.createElement('tbody');
+            galleryList.forEach((item, idx) => {
+                const row = document.createElement('tr');
+                row.style.cssText = `
+                    border-bottom: 1px solid #eee;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                `;
+                
+                // 鼠标悬停效果
+                row.onmouseenter = () => {
+                    row.style.background = '#f0f0f0';
+                };
+                row.onmouseleave = () => {
+                    row.style.background = idx === 0 ? '#e8f4fd' : 'transparent';
+                };
+                
+                // 默认高亮第一个
+                if (idx === 0) {
+                    row.style.background = '#e8f4fd';
+                }
+                
+                // 序号
+                const seqTd = document.createElement('td');
+                seqTd.style.cssText = `
+                    padding: 8px;
+                    border: 1px solid #eee;
+                    text-align: center;
+                `;
+                seqTd.textContent = `[${idx + 1}]`;
+                row.appendChild(seqTd);
+                
+                // 页数
+                const pagesTd = document.createElement('td');
+                pagesTd.style.cssText = `
+                    padding: 8px;
+                    border: 1px solid #eee;
+                    text-align: center;
+                `;
+                pagesTd.textContent = item.pages || '?';
+                row.appendChild(pagesTd);
+                
+                // 状态
+                const statusTd = document.createElement('td');
+                statusTd.style.cssText = `
+                    padding: 8px;
+                    border: 1px solid #eee;
+                    color: #666;
+                `;
+                statusTd.textContent = idx === 0 ? '✓ 已选中' : '';
+                row.appendChild(statusTd);
+                
+                // 点击跳转功能
+                row.onclick = () => {
+                    jumpToGallery(item.gid);
+                    highlightGallery(item.gid);
+                };
+                
+                tbody.appendChild(row);
+            });
+            table.appendChild(tbody);
+            dialog.appendChild(table);
+            
+            // 按钮
+            const buttonDiv = document.createElement('div');
+            buttonDiv.style.cssText = `
+                display: flex;
+                gap: 10px;
+                justify-content: flex-end;
+                padding-top: 10px;
+                border-top: 1px solid #ddd;
+            `;
+            
+            const copyBtn = document.createElement('button');
+            copyBtn.textContent = '复制标题';
+            copyBtn.style.cssText = `
+                padding: 8px 16px;
+                background: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+                color: #333;
+            `;
+            copyBtn.onclick = () => {
+                try {
+                    navigator.clipboard.writeText(title).then(() => {
+                        toastSuccess('已复制标题');
+                    });
+                } catch (err) {
+                    toastError('复制失败');
+                }
+            };
+            buttonDiv.appendChild(copyBtn);
+            
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = '确定';
+            closeBtn.style.cssText = `
+                padding: 8px 16px;
+                background: #007bff;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+            `;
+            closeBtn.onclick = () => {
+                modal.remove();
+                resolve();
+            };
+            buttonDiv.appendChild(closeBtn);
+            
+            dialog.appendChild(buttonDiv);
+            modal.appendChild(dialog);
+            document.body.appendChild(modal);
+        });
+    };
+
+    // 跳转到画廊位置
+    const jumpToGallery = (gid) => {
+        const gidStr = String(gid);
+        const galleryLink = document.querySelector(`.gl1t[href*="/g/${gidStr}/"], .gl3t a[href*="/g/${gidStr}/"]`);
+        if (!galleryLink) return;
+        
+        const galleryBlock = galleryLink.closest('.gl1e, .gl3t, tr');
+        if (!galleryBlock) return;
+        
+        // 使用平滑滚动
+        const rect = galleryBlock.getBoundingClientRect();
+        const scrollTop = window.scrollY + rect.top - 100;
+        window.scrollTo({
+            top: Math.max(0, scrollTop),
+            behavior: 'smooth'
+        });
+    };
+
+    // 高亮画廊
+    const highlightGallery = (gid) => {
+        const gidStr = String(gid);
+        const galleryLink = document.querySelector(`.gl1t[href*="/g/${gidStr}/"], .gl3t a[href*="/g/${gidStr}/"]`);
+        if (!galleryLink) return;
+        
+        const galleryBlock = galleryLink.closest('.gl1e, .gl3t, tr');
+        if (!galleryBlock) return;
+        
+        // 添加高亮彩框动画
+        const originalBox = galleryBlock.style.boxShadow;
+        const colors = ['#FFD700', '#FFA500', '#FF6347', '#32CD32', '#00BFFF'];
+        let colorIndex = 0;
+        
+        const animate = () => {
+            galleryBlock.style.boxShadow = `0 0 10px 2px ${colors[colorIndex]}`;
+            colorIndex = (colorIndex + 1) % colors.length;
+            
+            if (colorIndex === 0) {
+                // 动画完成，恢复原状
+                galleryBlock.style.boxShadow = originalBox;
+            } else {
+                setTimeout(animate, 200);
+            }
+        };
+        
+        animate();
+    };
+
     const exportSelectedGalleries = async () => {
         const entries = collectSelectedEntries();
         if (!entries.length) {
@@ -13183,6 +13972,536 @@
             return data.galleries.map((item) => (item && item.gid ? String(item.gid) : '')).filter(Boolean);
         }
         return [];
+    };
+
+    // 标题标准化函数：去后缀、去数字后缀、处理空格、忽略大小写
+    const normalizeTitle = (title) => {
+        if (!title) return '';
+        let normalized = title.trim();
+        // 去掉首尾空行、压缩连续空行为1个
+        normalized = normalized.replace(/\n\s*\n+/g, '\n').trim();
+        // 去掉常见的压缩包后缀
+        normalized = normalized.replace(/\.(zip|rar|7z|tar\.gz|tar\.bz2|tar\.xz|tar)$/i, '');
+        // 去掉 (1), (2), (3) 这样的数字后缀
+        normalized = normalized.replace(/\s*\(\d+\)\s*$/, '');
+        // 去掉 _1, _2, _3 这样的数字后缀
+        normalized = normalized.replace(/\s*_\d+\s*$/, '');
+        // 去掉首尾空格
+        normalized = normalized.trim();
+        // 转换为小写便于比对
+        return normalized.toLowerCase();
+    };
+
+    // 导出选择（仅标题）
+    const exportSelectionTitleOnly = async () => {
+        const entries = collectSelectedEntries();
+        if (!entries.length) {
+            toastWarn('未选择任何画廊');
+            return;
+        }
+
+        const titles = entries
+            .map((entry) => entry.galleryTitle || entry.info?.title || '')
+            .filter(Boolean);
+
+        if (!titles.length) {
+            toastWarn('选中的画廊没有标题信息');
+            return;
+        }
+
+        // 检测重名画廊
+        const titleCountMap = new Map();
+        const entryIndexMap = new Map(); // 保存原始 entry 的索引
+        
+        entries.forEach((entry, idx) => {
+            const title = titles[idx];
+            if (!title) return;
+            
+            if (!titleCountMap.has(title)) {
+                titleCountMap.set(title, []);
+                entryIndexMap.set(title, []);
+            }
+            
+            const gid = entry.checkbox?.dataset.galleryGid || entry.info?.gid;
+            titleCountMap.get(title).push({
+                gid: gid,
+                title: title,
+                pages: getGalleryInfo(gid)?.pages || '?'
+            });
+            entryIndexMap.get(title).push(idx);
+        });
+        
+        // 如果存在重名，显示浮窗让用户选择
+        const duplicateGroups = Array.from(titleCountMap.entries())
+            .filter(([title, items]) => items.length > 1)
+            .map(([title, items]) => items);
+        
+        if (duplicateGroups.length > 0) {
+            // 构建用户已选择的索引 Map
+            const userSelectedIndices = new Map();
+            let selectionGroupIdx = 0;
+            for (const [title, items] of titleCountMap.entries()) {
+                if (items.length > 1) {
+                    const originalEntryIndices = entryIndexMap.get(title) || [];
+                    
+                    // 【新增】按GID去重：同一个画廊（相同GID）只保留第一个种子的索引
+                    // 这样即使用户多选了同一个画廊的多个种子，在对话框中也只会显示一次
+                    const uniqueByGid = [];
+                    const seenGids = new Set();
+                    originalEntryIndices.forEach(idx => {
+                        const gid = items[idx]?.gid;
+                        if (gid && !seenGids.has(gid)) {
+                            seenGids.add(gid);
+                            uniqueByGid.push(idx);
+                        }
+                    });
+                    
+                    userSelectedIndices.set(selectionGroupIdx, uniqueByGid.length > 0 ? uniqueByGid : originalEntryIndices);
+                    selectionGroupIdx++;
+                }
+            }
+            
+            const userSelections = await showDuplicateHandlerDialog(duplicateGroups, userSelectedIndices);
+            if (!userSelections) return; // 用户取消
+            
+            // 根据用户选择重新生成标题列表
+            const finalTitles = [];
+            let groupIdx = 0;
+            
+            for (const [title, items] of titleCountMap.entries()) {
+                if (items.length > 1) {
+                    // 这是一个重名组，按用户选择添加
+                    const selectedIndices = userSelections.get(groupIdx) || [0];
+                    selectedIndices.forEach(itemIdx => {
+                        if (itemIdx < items.length) {
+                            finalTitles.push(items[itemIdx].title);
+                        }
+                    });
+                    groupIdx++;
+                } else {
+                    // 非重名项直接添加
+                    finalTitles.push(items[0].title);
+                }
+            }
+            
+            const text = finalTitles.join('\n');
+            try {
+                await copyMagnet(text);
+                toastSuccess(`已复制 ${finalTitles.length} 个画廊标题`);
+            } catch (err) {
+                console.warn('复制标题失败', err);
+                toastError('复制失败，请重试');
+            }
+        } else {
+            // 没有重名，直接导出
+            const text = titles.join('\n');
+            try {
+                await copyMagnet(text);
+                toastSuccess(`已复制 ${titles.length} 个画廊标题`);
+            } catch (err) {
+                console.warn('复制标题失败', err);
+                toastError('复制失败，请重试');
+            }
+        }
+    };
+
+    // 导入选择（仅标题）
+    const importSelectionTitleOnly = async () => {
+        let text = '';
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            try {
+                text = await navigator.clipboard.readText();
+            } catch (err) {
+                console.warn('读取剪贴板失败', err);
+            }
+        }
+        if (!text) {
+            const input = window.prompt('粘贴文件名列表（每行一个）：');
+            if (!input) return;
+            text = input;
+        }
+
+        // 分割输入，去掉空行
+        const fileNames = text
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+
+        if (!fileNames.length) {
+            toastWarn('输入为空');
+            return;
+        }
+
+        // 标准化文件名和搜索页标题
+        const normalizedFiles = fileNames.map((name) => normalizeTitle(name));
+
+        // 收集当前页面的所有画廊和其标题
+        const allCheckboxes = Array.from(document.querySelectorAll('.eh-magnet-checkbox'));
+        const galleryMap = new Map(); // Map: 标准化标题 -> [{checkbox, info, normalizedTitle}, ...]
+
+        allCheckboxes.forEach((checkbox) => {
+            const row = checkbox.closest('.eh-magnet-item');
+            const container = row?.closest('.eh-magnet-links');
+            let title = checkbox.dataset.galleryTitle
+                || row?.dataset.galleryTitle
+                || container?.dataset.galleryTitle
+                || '';
+
+            // 从DOM提取标题
+            const gid = checkbox.dataset.galleryGid || row?.dataset.galleryGid || container?.dataset.galleryGid;
+            if (!title && gid) {
+                const galleryLink = document.querySelector(`.gl1t[href*="/g/${gid}/"], .gl3t a[href*="/g/${gid}/"]`);
+                if (galleryLink) {
+                    const galleryBlock = galleryLink.closest('.gl1e, .gl3t');
+                    if (galleryBlock) {
+                        const titleElement = galleryBlock.querySelector('.gl1t');
+                        if (titleElement) {
+                            title = titleElement.textContent.trim();
+                        } else {
+                            const imgElement = galleryBlock.querySelector('.gl3t a img');
+                            if (imgElement) {
+                                title = imgElement.title || imgElement.alt || '';
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (title) {
+                const normalized = normalizeTitle(title);
+                if (!galleryMap.has(normalized)) {
+                    galleryMap.set(normalized, []);
+                }
+                galleryMap.get(normalized).push({
+                    checkbox,
+                    title,
+                    normalized,
+                });
+            }
+        });
+
+        // 进行匹配和标记
+        const matched = [];
+        const duplicates = new Map(); // 重复标题的记录
+        const unmatched = [];
+
+        normalizedFiles.forEach((normalizedFile) => {
+            const galleryList = galleryMap.get(normalizedFile);
+
+            if (!galleryList || galleryList.length === 0) {
+                unmatched.push(normalizedFile);
+            } else if (galleryList.length === 1) {
+                // 单独匹配，勾选
+                const { checkbox } = galleryList[0];
+                if (!checkbox.checked) {
+                    checkbox.checked = true;
+                }
+                matched.push(galleryList[0]);
+            } else {
+                // 多个匹配（重复标题）
+                if (!duplicates.has(normalizedFile)) {
+                    duplicates.set(normalizedFile, []);
+                }
+                
+                // 获取重名画廊的完整信息（包括页数）
+                const galleryInfoList = galleryList.map((item, idx) => ({
+                    gid: item.checkbox.dataset.galleryGid,
+                    title: item.title,
+                    pages: getGalleryInfo(item.checkbox.dataset.galleryGid)?.pages || '?',
+                    itemIndex: idx,  // 【新增】记录项在galleryList中的索引
+                }));
+                
+                duplicates.set(normalizedFile, galleryInfoList);
+                
+                // 重名处理：根据剪贴板中的数量，选择相应数量的重名项
+                // 计算该标题在剪贴板中出现的次数
+                // 【修复】只勾选每个GID的第一个，而不是根据剪贴板数量勾选多个
+                const seenGidsInDuplicates = new Set();
+                for (let i = 0; i < galleryList.length; i++) {
+                    const gid = galleryList[i].checkbox.dataset.galleryGid;
+                    // 同一GID只勾选第一个
+                    if (!seenGidsInDuplicates.has(gid)) {
+                        seenGidsInDuplicates.add(gid);
+                        if (!galleryList[i].checkbox.checked) {
+                            galleryList[i].checkbox.checked = true;
+                            matched.push(galleryList[i]); // 只在勾选时添加到 matched
+                        }
+                    }
+                }
+            }
+        });
+
+        rebuildSelectionSets();
+        updateSelectToggleState();
+
+        // 统计实际勾选的画廊数（去重）
+        const matchedGids = new Set();
+        matched.forEach(item => {
+            if (item.checkbox && item.checkbox.dataset.galleryGid) {
+                matchedGids.add(item.checkbox.dataset.galleryGid);
+            }
+        });
+
+        // 显示结果对话框
+        showImportResultDialog({
+            matched: matchedGids.size,
+            duplicates,
+            unmatched,
+            normalizedFiles,
+            fileNames,
+        });
+    };
+
+    // 导入结果对话框（改进版：支持重复项处理，右侧显示）
+    const showImportResultDialog = async (result) => {
+        const { matched, duplicates, unmatched, normalizedFiles, fileNames } = result;
+
+        // 创建右侧浮窗容器（不使用模态遮罩）
+        const floatingWindow = document.createElement('div');
+        floatingWindow.className = 'eh-import-result-window';
+        floatingWindow.style.cssText = `
+            position: fixed;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 150px;
+            max-height: 85vh;
+            background: rgba(255, 255, 255, 0.88);
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        `;
+
+        const dialog = floatingWindow;
+
+        // 统计数据（实时更新用）
+        const stats = {
+            matched: matched,
+            duplicates: duplicates.size,
+            unmatched: unmatched.length,
+            updateDisplay: function() {
+                const statsDiv = document.getElementById('import-stats-display');
+                if (statsDiv) {
+                    statsDiv.innerHTML = `
+                        <p><strong>✓ 已匹配:</strong> ${this.matched} 个</p>
+                        <p><strong>⚠ 重复标题:</strong> ${this.duplicates} 组</p>
+                        <p><strong>✗ 未匹配:</strong> ${this.unmatched} 个</p>
+                    `;
+                }
+            }
+        };
+
+        // 标题栏
+        const header = document.createElement('div');
+        header.style.cssText = `
+            padding: 10px 14px;
+            background: #f0f0f0;
+            color: #333;
+            font-weight: bold;
+            font-size: 13px;
+            border-bottom: 1px solid #ddd;
+        `;
+        header.textContent = '反查导入结果';
+        dialog.appendChild(header);
+        
+        // 内容容器
+        const content = document.createElement('div');
+        content.style.cssText = `
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        `;
+        
+        let html = '';
+
+        // 统计信息（可实时更新）
+        html += `
+            <div id="import-stats-display" style="background: #fafafa; padding: 8px; border-radius: 4px; margin-bottom: 10px; font-size: 12px; line-height: 1.6;">
+                <div style="margin: 3px 0; word-break: break-word;"><strong>✓</strong> 匹配 ${matched}</div>
+                <div style="margin: 3px 0; word-break: break-word;"><strong>⚠</strong> 重名 ${duplicates.size}</div>
+                <div style="margin: 3px 0; word-break: break-word;"><strong>✗</strong> 未匹配 ${unmatched.length}</div>
+            </div>
+        `;
+
+        // 重复标题列表（带复选框，支持实时更新统计和跳转）
+        if (duplicates.size > 0) {
+            html += '<div style="font-weight: bold; font-size: 11px; color: #e74c3c; margin-top: 8px; margin-bottom: 6px; word-break: break-word;">重复标题</div>';
+            html += '<div id="duplicate-items-container" style="background: #fafafa; border: 1px solid #ddd; border-radius: 4px; padding: 8px; margin-bottom: 10px;">';
+
+            let duplicateIndex = 0;
+            duplicates.forEach((galleryList, normalizedTitle) => {
+                html += `<div style="margin-bottom: 8px; padding: 6px; background: white; border-radius: 3px; border-left: 2px solid #e74c3c;">`;
+                html += `<div style="font-weight: bold; font-size: 11px; margin-bottom: 4px; word-break: break-word; white-space: pre-wrap; line-height: 1.4;">${galleryList[0].title}</div>`;
+                
+                // 画廊列表
+                // 【新增】记录每个GID已处理的第一项，同一GID只勾选第一个
+                const seenGidsInThisGroup = new Set();
+                galleryList.forEach((item, itemIdx) => {
+                    const checkboxId = `duplicate-checkbox-${duplicateIndex}-${itemIdx}`;
+                    // 【修复】同一GID只勾选第一个，其他的取消勾选
+                    const isFirstOfThisGid = !seenGidsInThisGroup.has(item.gid);
+                    if (isFirstOfThisGid) {
+                        seenGidsInThisGroup.add(item.gid);
+                    }
+                    const isChecked = isFirstOfThisGid;  // 只有第一个才被勾选
+                    html += `
+                        <div style="display: flex; align-items: center; padding: 4px 0; font-size: 11px;">
+                            <input type="checkbox" id="${checkboxId}" data-dup-index="${duplicateIndex}" data-item-index="${itemIdx}" data-gid="${item.gid}"
+                                   style="margin-right: 6px; cursor: pointer; flex-shrink: 0;" ${isChecked ? 'checked' : ''} />
+                            <span class="duplicate-page-link" style="flex: 1; color: #666; cursor: pointer; user-select: none; word-break: break-word;" data-gid="${item.gid}">
+                                [${itemIdx + 1}] ${item.pages}p
+                            </span>
+                        </div>
+                    `;
+                });
+                
+                html += `</div>`;
+                duplicateIndex++;
+            });
+
+            html += '</div>';
+        }
+
+
+        content.innerHTML = html;
+        dialog.appendChild(content);
+        
+        // 添加底部按钮栏
+        const footer = document.createElement('div');
+        footer.style.cssText = `
+            padding: 8px;
+            border-top: 1px solid #ddd;
+            background: #f9f9f9;
+            display: flex;
+            gap: 6px;
+        `;
+        
+        const btnClose = document.createElement('button');
+        btnClose.id = 'btn-close';
+        btnClose.textContent = '关闭';
+        btnClose.style.cssText = `
+            flex: 1;
+            padding: 4px;
+            background: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.3;
+        `;
+        
+        const btnUnmatched = document.createElement('button');
+        btnUnmatched.id = 'btn-unmatched';
+        btnUnmatched.innerHTML = '导出<br/>未匹配项';
+        btnUnmatched.style.cssText = `
+            flex: 1;
+            padding: 4px;
+            background: #ffe0e0;
+            border: 1px solid #ffb3b3;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.3;
+        `;
+        
+        footer.appendChild(btnClose);
+        footer.appendChild(btnUnmatched);
+        dialog.appendChild(footer);
+        
+        document.body.appendChild(dialog);
+
+        // 处理重复项复选框变化和跳转
+        if (duplicates.size > 0) {
+            const duplicateCheckboxes = dialog.querySelectorAll('input[data-dup-index]');
+            const pageLinks = dialog.querySelectorAll('.duplicate-page-link');
+            
+            // 复选框变化事件
+            duplicateCheckboxes.forEach((checkbox) => {
+                checkbox.addEventListener('change', () => {
+                    const gid = checkbox.dataset.gid;
+                    const itemIndex = parseInt(checkbox.dataset.itemIndex);
+                    
+                    // 【修复】找到该GID对应的所有checkbox，然后根据itemIndex选择第几个
+                    const allCheckboxesForGid = Array.from(document.querySelectorAll(`.eh-magnet-checkbox[data-gallery-gid="${gid}"]`));
+                    
+                    // 需要找到对应索引的checkbox
+                    // 由于同一GID可能有多个种子，需要找到对应位置的那个
+                    if (allCheckboxesForGid.length > itemIndex) {
+                        allCheckboxesForGid[itemIndex].checked = checkbox.checked;
+                    }
+                    
+                    // 实时更新统计
+                    rebuildSelectionSets();
+                    updateSelectToggleState();
+                    
+                    // 更新重复标题组数
+                    let newDuplicateCount = 0;
+                    duplicates.forEach((galleryList, normalizedTitle) => {
+                        const groupCheckboxes = Array.from(duplicateCheckboxes)
+                            .filter(cb => cb.getAttribute('data-dup-index') === checkbox.getAttribute('data-dup-index'));
+                        const anyChecked = groupCheckboxes.some(cb => cb.checked);
+                        const notAllChecked = groupCheckboxes.some(cb => !cb.checked);
+                        if (anyChecked && notAllChecked) {
+                            newDuplicateCount++;
+                        }
+                    });
+                    
+                    stats.duplicates = newDuplicateCount;
+                    stats.matched = Array.from(document.querySelectorAll('.eh-magnet-checkbox:checked')).length;
+                    stats.updateDisplay();
+                });
+            });
+            
+            // 页数链接点击跳转
+            pageLinks.forEach((link) => {
+                link.addEventListener('click', () => {
+                    const gid = link.dataset.gid;
+                    jumpToGallery(gid);
+                    highlightGallery(gid);
+                });
+            });
+        }
+
+        // 事件处理
+        btnClose.addEventListener('click', () => {
+            dialog.remove();
+        });
+
+        btnUnmatched.addEventListener('click', async () => {
+            if (unmatched.length === 0) {
+                toastInfo('没有未匹配的文件');
+                return;
+            }
+
+            // 反向转换：从标准化标题还原原始文件名
+            const unmatchedFiles = [];
+            unmatched.forEach((normalizedTitle) => {
+                // 查找原始文件名
+                const originalIndex = normalizedFiles.indexOf(normalizedTitle);
+                if (originalIndex !== -1) {
+                    const originalFileName = fileNames[originalIndex] || normalizedTitle;
+                    unmatchedFiles.push(originalFileName);
+                }
+            });
+
+            const text = unmatchedFiles.join('\n');
+            try {
+                await copyMagnet(text);
+                toastSuccess(`已复制 ${unmatchedFiles.length} 个未匹配项`);
+            } catch (err) {
+                console.warn('复制失败', err);
+                toastError('复制失败，请重试');
+            }
+        });
+
     };
 
     const importSelectionFromClipboard = async () => {
@@ -13913,6 +15232,17 @@
 
     const ensureSelectionContextMenu = () => {
         if (selectionContextMenu && document.body.contains(selectionContextMenu)) return selectionContextMenu;
+        
+        // 清理旧的二级菜单
+        document.querySelectorAll('.eh-selection-submenu').forEach(submenu => {
+            submenu.remove();
+        });
+        
+        // 清理旧菜单
+        if (selectionContextMenu && selectionContextMenu.parentNode) {
+            selectionContextMenu.remove();
+        }
+        
         const menu = document.createElement('div');
         menu.className = 'eh-selection-context-menu';
         menu.style.position = 'absolute';
@@ -13942,13 +15272,22 @@
             { id: 'toggle-include-ignored', label: '🚫&nbsp;已忽略', isToggle: true },
             { id: 'toggle-include-no-seeds', label: '❌&nbsp;无种子', isToggle: true },
             { id: 'toggle-include-outdated', label: '⏰&nbsp;种子过时', isToggle: true },
-            { id: 'export-selection', label: '💾 导出选择', requiresSelection: true },
-            { id: 'import-selection', label: '📂 导入选择' },
+            { id: 'import-export-submenu', label: '📥📤 导入/导出选择', isSubmenu: true },
             { id: 'hide-temp', label: '👁️ 临时隐藏所选', requiresSelection: true },
             { id: 'unhide-temp', label: '👁️‍🗨️ 取消临时隐藏', requiresHidden: true },
             { id: 'download-torrent', label: '⬇️ 下载所选种子', requiresSelection: true, requiresTorrent: true },
             { id: 'clear', label: '🗑️ 清除标识', requiresSelection: true },
         ];
+
+        // 二级菜单定义：导入/导出选择
+        const submenuDefs = {
+            'import-export-submenu': [
+                { id: 'export-selection', label: '💾 导出选择', requiresSelection: true },
+                { id: 'import-selection', label: '📂 导入选择' },
+                { id: 'export-selection-title-only', label: '📄 导出选择（仅标题）', requiresSelection: true },
+                { id: 'import-selection-title-only', label: '🔍 导入选择（仅标题）' },
+            ]
+        };
 
         // 创建"多选时包含"标题和复选框组
         const toggleDefs = actionDefs.filter(def => def.isToggle);
@@ -14043,8 +15382,151 @@
             menu.appendChild(toggleContainer);
         }
 
-        // 渲染普通按钮
+        // 渲染普通按钮和二级菜单
         actionDefs.filter(def => !def.isToggle).forEach((def) => {
+            // 处理二级菜单
+            if (def.isSubmenu && submenuDefs[def.id]) {
+                const container = document.createElement('div');
+                container.style.position = 'relative';
+                container.style.display = 'block';
+                container.style.overflow = 'visible';  // 允许二级菜单溢出
+                
+                const item = document.createElement('button');
+                item.type = 'button';
+                item.dataset.action = def.id;
+                item.innerHTML = def.label + ' ▶';
+                item.style.display = 'block';
+                item.style.width = '100%';
+                item.style.padding = '6px 14px';
+                item.style.border = 'none';
+                item.style.background = 'transparent';
+                item.style.color = 'inherit';
+                item.style.textAlign = 'left';
+                item.style.cursor = 'pointer';
+                item.style.fontSize = '13px';
+                item.style.fontWeight = '600';
+                item.style.userSelect = 'none';
+                item.style.position = 'relative';
+                item.style.zIndex = '1';
+                
+                // 创建二级菜单容器
+                const submenu = document.createElement('div');
+                submenu.className = 'eh-selection-submenu';
+                submenu.style.position = 'fixed';  // 改为 fixed 以避免主菜单的 overflow 影响
+                submenu.style.display = 'none';
+                submenu.style.minWidth = '200px';
+                submenu.style.zIndex = '1000000';
+                submenu.style.pointerEvents = 'auto';  // 确保能接收点击事件
+                applyMenuSurfaceStyle(submenu, {
+                    minWidth: '200px',
+                    padding: '6px 0',
+                    zIndex: '1000000',
+                });
+                
+                // 填充二级菜单项
+                submenuDefs[def.id].forEach((subDef) => {
+                    const subItem = document.createElement('button');
+                    subItem.type = 'button';
+                    subItem.dataset.action = subDef.id;
+                    if (subDef.requiresSelection) subItem.dataset.requiresSelection = 'true';
+                    if (subDef.requiresTorrent) subItem.dataset.requiresTorrent = 'true';
+                    subItem.innerHTML = subDef.label;
+                    subItem.style.display = 'block';
+                    subItem.style.width = '100%';
+                    subItem.style.padding = '6px 14px';
+                    subItem.style.border = 'none';
+                    subItem.style.background = 'transparent';
+                    subItem.style.color = 'inherit';
+                    subItem.style.textAlign = 'left';
+                    subItem.style.cursor = 'pointer';
+                    subItem.style.fontSize = '13px';
+                    subItem.style.fontWeight = '600';
+                    subItem.style.pointerEvents = 'auto';  // 确保能接收点击事件
+                    
+                    // 添加二级菜单项的 title 提示
+                    const submenuTitleMap = {
+                        'export-selection': '导出所选画廊列表到剪贴板（包含标题和链接）',
+                        'import-selection': '从剪贴板导入画廊列表并选中（包含标题和链接）',
+                        'export-selection-title-only': '导出所选画廊的标题列表到剪贴板',
+                        'import-selection-title-only': '从剪贴板导入画廊标题列表并在当前页面选中匹配项',
+                    };
+                    if (submenuTitleMap[subDef.id]) {
+                        subItem.title = submenuTitleMap[subDef.id];
+                    }
+                    
+                    const hoverColor = getMenuHoverBackground();
+                    subItem.addEventListener('mouseenter', () => {
+                        if (subItem.disabled) return;
+                        subItem.style.background = hoverColor;
+                    });
+                    subItem.addEventListener('mouseleave', () => {
+                        subItem.style.background = 'transparent';
+                    });
+                    subItem.addEventListener('click', (event) => {
+                        event.stopPropagation();
+                        if (subItem.disabled) return;
+                        hideSelectionContextMenu();
+                        handleSelectionContextAction(subDef.id);
+                    });
+                    submenu.appendChild(subItem);
+                });
+                
+                const hoverColor = getMenuHoverBackground();
+                let submenuTimeout = null;
+                
+                item.addEventListener('mouseenter', () => {
+                    clearTimeout(submenuTimeout);
+                    // 计算二级菜单位置（fixed 定位，相对视口）
+                    const rect = item.getBoundingClientRect();
+                    const viewportWidth = window.innerWidth;
+                    
+                    // 获取二级菜单的父菜单位置，用于计算二级菜单展开方向
+                    const parentMenu = menu;
+                    const parentRect = parentMenu.getBoundingClientRect();
+                    
+                    // 判断是否有足够空间向左展开
+                    const hasSpaceOnLeft = parentRect.left > 220;
+                    
+                    if (hasSpaceOnLeft) {
+                        // 左边有足够空间，二级菜单向左展开
+                        submenu.style.left = (parentRect.left - 210) + 'px';  // 父菜单左边 - 二级菜单宽度 - 间隔
+                    } else {
+                        // 左边空间不足，二级菜单向右展开
+                        submenu.style.left = (parentRect.right + 4) + 'px';  // 父菜单右边 + 间隔
+                    }
+                    
+                    // 二级菜单顶部对齐当前菜单项
+                    submenu.style.top = rect.top + 'px';
+                    
+                    submenu.style.display = 'block';
+                    item.style.background = hoverColor;
+                });
+                
+                item.addEventListener('mouseleave', () => {
+                    submenuTimeout = setTimeout(() => {
+                        submenu.style.display = 'none';
+                    }, 150);
+                });
+                
+                submenu.addEventListener('mouseenter', () => {
+                    clearTimeout(submenuTimeout);
+                    submenu.style.display = 'block';
+                });
+                
+                submenu.addEventListener('mouseleave', () => {
+                    submenuTimeout = setTimeout(() => {
+                        submenu.style.display = 'none';
+                    }, 150);
+                });
+                
+                container.appendChild(item);
+                menu.appendChild(container);
+                // 二级菜单直接添加到 document.body，因为使用 fixed 定位
+                document.body.appendChild(submenu);
+                return;
+            }
+            
+            // 处理普通菜单项
             const item = document.createElement('button');
             item.type = 'button';
             item.dataset.action = def.id;
@@ -14077,12 +15559,11 @@
                 'cancel': '取消所有选中，清空复选框',
                 'selectall': '勾选全部画廊（根据过滤条件）',
                 'invert': '反转选中状态',
-                'export-selection': '导出所选画廊列表',
-                'import-selection': '从剪贴板导入画廊列表',
                 'hide-temp': '临时隐藏选中画廊，重新加载后恢复',
                 'unhide-temp': '显示所有被临时隐藏的画廊',
                 'download-torrent': '下载所选画廊的种子文件',
                 'clear': '清除所有选中画廊的标记和忽略状态',
+                'import-export-submenu': '导入或导出选择列表',
             };
             if (titleMap[def.id]) {
                 item.title = titleMap[def.id];
@@ -14133,6 +15614,8 @@
         });
         const ariaAvailable = isAriaEhBridgeAvailable();
         const ariaConfigured = ariaAvailable && isAriaEhBridgeConfigured();
+        
+        // 更新主菜单按钮
         selectionContextMenu.querySelectorAll('button[data-action]').forEach((item) => {
             if (!(item instanceof HTMLButtonElement)) return;
             const requiresSelection = item.dataset.requiresSelection === 'true';
@@ -14153,6 +15636,24 @@
                 item.style.cursor = 'pointer';
             }
         });
+        
+        // 更新二级菜单按钮（在 document.body 中）
+        document.querySelectorAll('.eh-selection-submenu button[data-action]').forEach((item) => {
+            if (!(item instanceof HTMLButtonElement)) return;
+            const requiresSelection = item.dataset.requiresSelection === 'true';
+            const requiresTorrent = item.dataset.requiresTorrent === 'true';
+            const shouldDisable = (requiresSelection && !hasSelection)
+                || (requiresTorrent && !hasTorrentSelection);
+            if (shouldDisable) {
+                item.disabled = true;
+                item.style.opacity = '0.45';
+                item.style.cursor = 'not-allowed';
+            } else {
+                item.disabled = false;
+                item.style.opacity = '1';
+                item.style.cursor = 'pointer';
+            }
+        });
     };
 
     const hideSelectionContextMenu = () => {
@@ -14160,6 +15661,12 @@
         selectionContextMenu.style.display = 'none';
         selectionContextMenu.dataset.visible = 'false';
         selectionContextMenu.dataset.anchor = '';
+        
+        // 隐藏所有二级菜单
+        document.querySelectorAll('.eh-selection-submenu').forEach(submenu => {
+            submenu.style.display = 'none';
+        });
+        
         if (selectionContextMenuOutsideHandler) {
             document.removeEventListener('mousedown', selectionContextMenuOutsideHandler, true);
             selectionContextMenuOutsideHandler = null;
@@ -14200,6 +15707,18 @@
         if (action === 'import-selection') {
             Promise.resolve(importSelectionFromClipboard()).catch((err) => {
                 console.warn('导入选择失败', err);
+            });
+            return;
+        }
+        if (action === 'export-selection-title-only') {
+            Promise.resolve(exportSelectionTitleOnly()).catch((err) => {
+                console.warn('导出选择（仅标题）失败', err);
+            });
+            return;
+        }
+        if (action === 'import-selection-title-only') {
+            Promise.resolve(importSelectionTitleOnly()).catch((err) => {
+                console.warn('导入选择（仅标题）失败', err);
             });
             return;
         }
@@ -14398,6 +15917,9 @@
 
         selectionContextMenuOutsideHandler = (e) => {
             if (menu.contains(e.target)) return;
+            // 检查点击是否在任何二级菜单内
+            const submenu = document.querySelector('.eh-selection-submenu[style*="display: block"]');
+            if (submenu && submenu.contains(e.target)) return;
             hideSelectionContextMenu();
         };
         document.addEventListener('mousedown', selectionContextMenuOutsideHandler, true);

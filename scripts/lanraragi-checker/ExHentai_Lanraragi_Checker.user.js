@@ -9,7 +9,7 @@
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @license MIT
-// @version     1.6.1
+// @version     1.7.0
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -22,12 +22,15 @@
     // ===== 简繁体转换映射表（在文件末尾初始化） =====
     let S2T_MAP = {};
     let T2S_MAP = {};
-    
+
+    // ===== 缩略图缓存（内存缓存，页面级别） =====
+    const thumbnailCache = {};
+
     // 简体转繁体
     function toTraditional(text) {
         return text.split('').map(char => S2T_MAP[char] || char).join('');
     }
-    
+
     // 繁体转简体
     function toSimplified(text) {
         return text.split('').map(char => T2S_MAP[char] || char).join('');
@@ -35,26 +38,41 @@
 
     // ===== 原字典内容已移至文件末尾 =====
 
+    // ===== 标记类型常量（必须在所有函数之前定义） =====
+    const MARKER_TYPES = {
+        FOUND: 'found',           // ✓ 精确匹配
+        PARTIAL: 'partial',       // ! 可能匹配
+        MULTIPLE: 'multiple',     // ?N 多个匹配
+        NOT_FOUND: 'notfound',    // 🔄 未找到
+        ERROR: 'error',           // ⚠️ 错误
+        SEARCHING: 'searching'    // ⏳ 搜索中（临时）
+    };
+
     // --- 用户配置开始 ---
     // 注意：以下值仅作为备用，优先使用脚本设置界面中保存的值
     const DEFAULT_LRR_SERVER_URL = 'http://localhost:3000'; // 替换为您的 Lanraragi 服务器地址
     const DEFAULT_LRR_API_KEY = ''; // 如果您的 Lanraragi API 需要密钥，请填写
     // --- 用户配置结束 ---
-    
+
     // 其他配置（可选）
     const DEFAULT_CONFIG = {
         lrrServerUrl: DEFAULT_LRR_SERVER_URL,
         lrrApiKey: DEFAULT_LRR_API_KEY,
         maxConcurrentRequests: 5,
         cacheExpiryDays: 7,
-        enableDeepSearch: true,
+        enableDeepSearch: false,
         cacheNotFoundResults: true,
         deepSearchConcurrency: 3,
         deepSearchDelay: 500,
         // 关键词管理（逗号分隔）
         authorWhitelist: '',
         coreWhitelist: '',
-        coreBlacklist: 'AI Generated,Decensored,Patreon,Fanbox,Uncensored,Censored,定制,定製'
+        coreBlacklist: 'AI Generated,Decensored,Patreon,Fanbox,Uncensored,Censored,定制,定製',
+        // 页数匹配配置
+        enablePagecountMatching: true,
+        pagecountTolerance: 5,
+        // 标题搜索优先级
+        titleSearchOrder: 'gj'  // 'gj' 或 'gn'
     };
 
     // 加载配置
@@ -163,7 +181,11 @@
     }
 
     function extractCoreToken(title) {
-        if (!title) return null;
+        // 防御性检查：处理 null/undefined 输入
+        if (!title || typeof title !== 'string') {
+            console.log(`[LRR Checker] extractCoreToken: Invalid input - ${typeof title}`);
+            return null;
+        }
         let working = title;
         const whitelist = getCoreWhitelist();
         const blacklist = getCoreBlacklist();
@@ -181,53 +203,76 @@
 
         const uniqueTokens = [];
         const seen = new Set();
+        let numberTokens = []; // 收集数字 token
         tokens.forEach(token => {
             const normalized = normalizeKeywordValue(token);
             if (!normalized) return;
             if (blacklist.includes(normalized)) return;
             if (seen.has(normalized)) return;
             seen.add(normalized);
-            uniqueTokens.push(token.trim());
+
+            // 如果是纯数字，单独收集
+            if (/^\d+$/.test(token)) {
+                numberTokens.push(token);
+            } else {
+                uniqueTokens.push(token.trim());
+            }
         });
 
-        if (!uniqueTokens.length) {
+        if (!uniqueTokens.length && !numberTokens.length) {
             const clean = title.replace(/[\[\](){}]/g, ' ').trim();
             return clean ? { token: clean } : null;
         }
 
         const whitelistHit = uniqueTokens.find(token => containsKeyword(token, whitelist));
         if (whitelistHit) {
-            return { token: whitelistHit.trim() };
+            // 组合主 token 和数字 token
+            const result = whitelistHit.trim();
+            if (numberTokens.length > 0) {
+                return { token: result, numberTokens: numberTokens };
+            }
+            return { token: result };
         }
 
         // 若用户在白名单文本中使用原大小写，优先返回原文本
         const exactWhitelistHit = uniqueTokens.find(token => whitelistOriginal.some(origin => origin && token.includes(origin)));
         if (exactWhitelistHit) {
-            return { token: exactWhitelistHit.trim() };
+            const result = exactWhitelistHit.trim();
+            if (numberTokens.length > 0) {
+                return { token: result, numberTokens: numberTokens };
+            }
+            return { token: result };
         }
 
         const sortedTokens = [...uniqueTokens].sort((a, b) => b.length - a.length);
-        
+
         // 如果最长的词是通用词（如 Animated, GIFs），尝试组合前两个词
         const candidate = sortedTokens[0];
         const genericWords = ['animated', 'gifs', 'gif', 'images', 'pics', 'pictures', 'art', 'collection'];
-        const isGeneric = genericWords.includes(candidate.toLowerCase());
-        
+        // 防御性检查：candidate 可能是 undefined（当 sortedTokens 为空时）
+        const isGeneric = candidate && genericWords.includes(candidate.toLowerCase());
+
         if (isGeneric && sortedTokens.length > 1) {
             // 组合前两个词
             const combined = sortedTokens.slice(0, 2).join(' ');
+            if (numberTokens.length > 0) {
+                return { token: combined.trim(), numberTokens: numberTokens };
+            }
             return { token: combined.trim() };
         }
-        
+
         let processedCandidate = candidate;
-        if (/[a-zA-Z]/.test(candidate)) {
+        if (candidate && /[a-zA-Z]/.test(candidate)) {
             processedCandidate = candidate
-                .replace(/(?:[-_+\s]*(?:\d+[a-z]*|vol\.?\d+|ch\.?\d+|part\d+))*$/gi, '')
+                .replace(/(?:[-_+\s]*(?:vol\.?\d+|ch\.?\d+|part\d+))*$/gi, '')
                 .replace(/[-_+]+$/g, '')
                 .trim();
         }
         const finalToken = processedCandidate || candidate;
-        return { token: finalToken.trim() };
+        if (finalToken && numberTokens.length > 0) {
+            return { token: finalToken.trim(), numberTokens: numberTokens };
+        }
+        return finalToken ? { token: finalToken.trim() } : null;
     }
 
     function extractDateToken(text) {
@@ -243,7 +288,7 @@
         const hasChinese = /[\u4e00-\u9fa5]/.test(text);
         const hasJapanese = /[\u3040-\u309f\u30a0-\u30ff]/.test(text);
         const hasKorean = /[\uac00-\ud7af]/.test(text);
-        
+
         if (hasChinese) return 'chinese';
         if (hasJapanese) return 'japanese';
         if (hasKorean) return 'korean';
@@ -316,17 +361,23 @@
             font-weight: bold;
         }
 
+        .lrr-marker-fallback {
+            color: #6f42c1;
+            background-color: #e7d9ff;
+            font-weight: bold;
+        }
+
         .lrr-marker-error {
             color: #dc3545;
             background-color: #fbe9ea;
         }
-        
+
         .lrr-marker-multiple {
             color: #fd7e14;
             background-color: #fff3cd;
             font-weight: bold;
         }
-        
+
         .lrr-marker-notfound {
             color: #666;
             background-color: transparent;
@@ -335,31 +386,31 @@
             cursor: pointer;
             padding: 2px 4px;
         }
-        
+
         .lrr-marker-notfound:hover {
             color: #5c0d12;
             border-color: #5c0d12;
             background-color: #f5f5f5;
         }
-        
+
         .lrr-marker-searching {
             color: #17a2b8;
             background-color: #d1ecf1;
             animation: pulse 1.5s ease-in-out infinite;
             font-weight: bold;
         }
-        
+
         @keyframes pulse {
-            0%, 100% { 
+            0%, 100% {
                 opacity: 1;
                 transform: scale(1);
             }
-            50% { 
+            50% {
                 opacity: 0.7;
                 transform: scale(1.05);
             }
         }
-        
+
         /* 弹出菜单 */
         .lrr-popup-menu {
             position: fixed;
@@ -374,11 +425,11 @@
             font-size: 13px;
             line-height: 1.5;
         }
-        
+
         .lrr-popup-menu.show {
             display: block;
         }
-        
+
         .lrr-popup-header {
             padding: 6px 12px;
             font-weight: bold;
@@ -389,11 +440,11 @@
             justify-content: space-between;
             align-items: center;
         }
-        
+
         .lrr-popup-header-text {
             flex: 1;
         }
-        
+
         .lrr-popup-refresh-btn {
             padding: 4px 8px;
             background: #fff;
@@ -406,12 +457,12 @@
             white-space: nowrap;
             margin-right: 8px;
         }
-        
+
         .lrr-popup-refresh-btn:hover {
             background: #5c0d12;
             color: #fff;
         }
-        
+
         .lrr-popup-item {
             padding: 6px 12px;
             cursor: pointer;
@@ -423,17 +474,17 @@
             transition: background 0.15s;
             word-wrap: break-word;
         }
-        
+
         .lrr-popup-item:hover {
             background: #d5d2ca;
             color: #000;
         }
-        
+
         .lrr-popup-item-content {
             flex: 1;
             min-width: 0;
         }
-        
+
         .lrr-popup-item-text {
             display: block;
             word-wrap: break-word;
@@ -441,21 +492,21 @@
             line-height: 1.4;
             text-align: left;
         }
-        
+
         .lrr-popup-item-label {
             font-size: 11px;
             color: #888;
             display: block;
             margin-bottom: 2px;
         }
-        
+
         .lrr-popup-item-pagecount {
             font-size: 11px;
             color: #666;
             display: block;
             margin-top: 3px;
         }
-        
+
         .lrr-popup-item-thumbnail {
             width: 80px !important;
             height: 80px !important;
@@ -470,13 +521,13 @@
             display: block !important;
             visibility: visible !important;
         }
-        
+
         .lrr-popup-divider {
             height: 1px;
             background: #c8c4b7;
             margin: 4px 0;
         }
-        
+
         .lrr-popup-id {
             font-family: monospace;
             font-size: 11px;
@@ -551,12 +602,12 @@
         return new Promise((resolve, reject) => {
             let timeoutId;
             const timeout = options.timeout || 30000; // 30秒超时
-            
+
             timeoutId = setTimeout(() => {
                 console.warn(`[LRR Checker] Request timeout after ${timeout}ms: ${options.url}`);
                 reject(new Error(`Request timeout after ${timeout}ms`));
             }, timeout);
-            
+
             const requestConfig = {
                 method: options.method,
                 url: options.url,
@@ -588,7 +639,7 @@
                     reject(new Error('Request timeout'));
                 }
             };
-            
+
             GM_xmlhttpRequest(requestConfig);
         });
     }
@@ -709,7 +760,127 @@
                 await processInBatches(
                     cachedGalleries,
                     async (gallery) => {
-                        await handleResponse(gallery.cachedData, gallery.titleElement, gallery.galleryUrl);
+                        // 缓存数据已经包含最终状态，直接显示而不需要重新处理
+                        const { cachedData, titleElement } = gallery;
+                        
+                        if (cachedData.success === 1) {
+                            // 精确匹配
+                            console.log(`[LRR Checker] Found from cache: ${gallery.galleryUrl}`);
+                            const isExactMatch = cachedData.isExactMatch === true;
+                            const archiveId = cachedData.data?.id;
+                            const archiveTitle = cachedData.archiveTitle || '加载中...';
+                            const archivePagecount = cachedData.archivePagecount || null;
+                            
+                            const menuBuilder = () => {
+                                const readerUrl = `${CONFIG.lrrServerUrl}/reader?id=${archiveId}`;
+                                const thumbnailUrl = `${CONFIG.lrrServerUrl}/api/archives/${archiveId}/thumbnail`;
+                                return {
+                                    header: '已存档',
+                                    items: [{
+                                        text: archiveTitle,
+                                        url: readerUrl,
+                                        thumbnailUrl: thumbnailUrl,
+                                        pagecount: archivePagecount
+                                    }],
+                                    refreshCallback: () => {
+                                        clearGalleryCache(gallery.galleryUrl, null);
+                                        const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                                        refreshGalleryCheck(gallery.galleryUrl, titleElement, displayTitle);
+                                    }
+                                };
+                            };
+                            
+                            setFinalMarker(titleElement, {
+                                type: isExactMatch ? MARKER_TYPES.FOUND : MARKER_TYPES.PARTIAL,
+                                icon: isExactMatch ? '✓' : '!',
+                                label: isExactMatch ? 'LRR已收录' : 'LRR可能有匹配',
+                                className: isExactMatch ? 'lrr-marker-downloaded' : 'lrr-marker-file',
+                                menuBuilder: menuBuilder
+                            });
+                        } else if (cachedData.success === 0 && cachedData.count > 0) {
+                            // 多个或单个备选结果
+                            console.log(`[LRR Checker] ${cachedData.count} fallback result(s) from cache: ${gallery.galleryUrl}`);
+                            if (cachedData.count === 1) {
+                                // 单个备选
+                                const fallbackFile = cachedData.files[0];
+                                setFinalMarker(titleElement, {
+                                    type: MARKER_TYPES.PARTIAL,
+                                    icon: '!',
+                                    label: 'LRR找到可能匹配（页数不完全符合）',
+                                    className: 'lrr-marker-file',
+                                    menuBuilder: () => ({
+                                        header: '可能匹配',
+                                        items: [{
+                                            text: fallbackFile.title,
+                                            url: `${CONFIG.lrrServerUrl}/reader?id=${fallbackFile.arcid}`,
+                                            thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${fallbackFile.arcid}/thumbnail`,
+                                            pagecount: fallbackFile.pagecount
+                                        }]
+                                    })
+                                });
+                            } else {
+                                // 多个备选
+                                setFinalMarker(titleElement, {
+                                    type: MARKER_TYPES.MULTIPLE,
+                                    icon: `?${cachedData.count}`,
+                                    label: `LRR发现${cachedData.count}个可能匹配`,
+                                    className: 'lrr-marker-multiple',
+                                    menuBuilder: () => {
+                                        const items = [];
+                                        cachedData.files.forEach((file, index) => {
+                                            if (index > 0) items.push({ divider: true });
+                                            items.push({
+                                                text: `${index + 1}. ${file.title}`,
+                                                url: `${CONFIG.lrrServerUrl}/reader?id=${file.arcid}`,
+                                                thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${file.arcid}/thumbnail`,
+                                                pagecount: file.pagecount
+                                            });
+                                        });
+                                        return { 
+                                            header: `找到 ${cachedData.count} 个可能的匹配`, 
+                                            items,
+                                            refreshCallback: () => {
+                                                clearGalleryCache(gallery.galleryUrl, null);
+                                                const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                                                refreshGalleryCheck(gallery.galleryUrl, titleElement, displayTitle);
+                                            }
+                                        };
+                                    }
+                                });
+                            }
+                        } else if (cachedData.isNetworkError === true) {
+                            // 网络错误
+                            console.log(`[LRR Checker] Network error from cache: ${gallery.galleryUrl}`);
+                            setFinalMarker(titleElement, {
+                                type: MARKER_TYPES.ERROR,
+                                icon: '⚠️',
+                                label: 'LRR连接失败',
+                                className: 'lrr-marker-error',
+                                onClick: (e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    clearGalleryCache(gallery.galleryUrl, '');
+                                    const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                                    refreshGalleryCheck(gallery.galleryUrl, titleElement, displayTitle);
+                                }
+                            });
+                        } else {
+                            // 未找到
+                            console.log(`[LRR Checker] Not found from cache: ${gallery.galleryUrl}`);
+                            setFinalMarker(titleElement, {
+                                type: MARKER_TYPES.NOT_FOUND,
+                                icon: '🔄',
+                                label: 'LRR未找到',
+                                className: 'lrr-marker-notfound',
+                                onClick: (e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    clearGalleryCache(gallery.galleryUrl, null);
+                                    const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                                    refreshGalleryCheck(gallery.galleryUrl, titleElement, displayTitle);
+                                }
+                            });
+                        }
                         return { success: true, galleryUrl: gallery.galleryUrl };
                     },
                     MAX_CONCURRENT_REQUESTS
@@ -724,42 +895,194 @@
     let galleriesToCheck = collectGalleries();
 
     // 处理单个画廊的查询
+    // 通过 gid/token 进行精确搜索（使用 source tag 格式）
+    async function searchByGidToken(gid, token) {
+        try {
+            // 使用 source tag 中的原文片段格式进行搜索
+            // 用引号包裹以进行短语搜索，避免分词后的模糊匹配
+            const searchQuery = `"g/${gid}/${token}"`;
+            console.log(`[LRR Checker] 尝试 gid/token 搜索: ${searchQuery}`);
+
+            const headers = {};
+            if (CONFIG.lrrApiKey) {
+                headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
+            }
+
+            const response = await makeRequest({
+                method: 'GET',
+                url: `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodeURIComponent(searchQuery)}`,
+                headers: headers
+            });
+
+            const result = JSON.parse(response.responseText);
+
+            if (result.data && result.data.length > 0) {
+                console.log(`[LRR Checker] gid/token 搜索找到 ${result.data.length} 个结果`);
+                // 调试：打印返回的结果列表
+                result.data.forEach((file, index) => {
+                    console.log(`[LRR Checker] 结果 ${index + 1}: ${file.title || file.filename}`);
+                });
+                return {
+                    success: result.data.length === 1,
+                    count: result.data.length,
+                    files: result.data,
+                    method: 'gidtoken'
+                };
+            } else {
+                console.log(`[LRR Checker] gid/token 搜索无结果`);
+                return { success: false, count: 0, method: 'gidtoken' };
+            }
+        } catch (err) {
+            console.warn(`[LRR Checker] gid/token 搜索失败:`, err);
+            // 标记为网络错误，让脚本知道应该停止后续搜索
+            return { success: false, count: 0, method: 'gidtoken', isNetworkError: true };
+        }
+    }
+
     async function processGallery(gallery) {
         const { galleryUrl, titleElement, cacheKey } = gallery;
-        const apiUrl = `${CONFIG.lrrServerUrl}/api/plugins/use?plugin=urlfinder&arg=${encodeURIComponent(galleryUrl)}`;
         const headers = {};
         if (CONFIG.lrrApiKey) {
             headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
         }
 
-        try {
-            const response = await makeRequest({
-                method: 'POST',
-                url: apiUrl,
-                headers: headers
-            });
+        // 在搜索开始时显示⏳标记，一次性显示，中间不改变
+        setSearchingMarker(titleElement);
 
-            try {
-                const result = JSON.parse(response.responseText);
-                setCache(cacheKey, result);
-                await handleResponse(result, titleElement, galleryUrl);
-                return { success: true, galleryUrl };
-            } catch (e) {
-                console.error(`[LRR Checker] Error parsing JSON for ${galleryUrl}:`, e, response.responseText);
-                let markerSpan = document.createElement('span');
-                markerSpan.classList.add('lrr-marker-span', 'lrr-marker-error');
-                setMarkerIcon(markerSpan, '⚠', 'LRR检查出错');
-                markerSpan.title = 'LRR检查出错，请稍后重试';
-                if (titleElement) titleElement.prepend(markerSpan);
-                return { success: false, galleryUrl, error: e };
+        try {
+            // 提前提取页数，避免后续重复提取
+            const ehPagecount = extractEhPagecount(titleElement);
+            console.log(`[LRR Checker] 页数预提取: ${ehPagecount ? ehPagecount + '页' : '未找到'}`);
+
+            // 优先级 1: gid/token 搜索（通过 source tag 内容精确查询）
+            const gidTokenMatch = galleryUrl.match(/\/g\/(\d+)\/([a-f0-9]+)/);
+            if (gidTokenMatch) {
+                console.log(`[LRR Checker] Step 1: 尝试 gid/token 搜索`);
+                const gidTokenResult = await searchByGidToken(gidTokenMatch[1], gidTokenMatch[2]);
+
+                if (gidTokenResult.success && gidTokenResult.count === 1) {
+                    console.log(`[LRR Checker] ✓ gid/token 搜索成功找到精确匹配`);
+                    const result = { success: 1, data: { id: gidTokenResult.files[0].arcid }, method: 'gidtoken', isExactMatch: true };
+                    setCache(cacheKey, result);
+                    await handleResponse(result, titleElement, galleryUrl, [], cacheKey);
+                    return { success: true, galleryUrl, method: 'gidtoken' };
+                } else if (gidTokenResult.isNetworkError === true) {
+                    // 第 1 层网络错误，立即停止不继续后续搜索
+                    console.log(`[LRR Checker] gid/token 搜索网络错误，停止后续搜索`);
+                    const result = { success: 0, isNetworkError: true };
+                    // 网络错误不缓存，每次都重新检测
+                    await handleResponse(result, titleElement, galleryUrl, [], cacheKey);
+                    return { success: false, galleryUrl, method: 'gidtoken' };
+                } else {
+                    console.log(`[LRR Checker] gid/token 搜索未找到，继续标题搜索`);
+                }
             }
+
+            // 优先级 2: 完整标题搜索（第一阶段保险搜索）
+            console.log(`[LRR Checker] Step 2: 尝试完整标题搜索`);
+            
+            // 获取完整标题（从画廊详情页提取 #gn 和 #gj）
+            const titles = await fetchGalleryTitles(galleryUrl);
+            if (!titles || (!titles.gn && !titles.gj)) {
+                console.log(`[LRR Checker] Failed to fetch titles from detail page`);
+                // 检查是否是网络错误
+                const isNetworkError = titles && titles.isNetworkError === true;
+                const result = { success: 0, isNetworkError };
+                // 网络错误不缓存，每次都重新检测
+                if (!isNetworkError) {
+                    setCache(cacheKey, result);
+                }
+                await handleResponse(result, titleElement, galleryUrl, [], cacheKey);
+                return { success: false, galleryUrl, method: 'none' };
+            }
+            
+            // 决定使用哪个标题作为"完整标题搜索"的候选
+            const shouldSearchGnFirst = CONFIG.titleSearchOrder !== 'gj';
+            const primaryTitle = shouldSearchGnFirst ? titles.gn : titles.gj;
+            const secondaryTitle = shouldSearchGnFirst ? titles.gj : titles.gn;
+            
+            // 阶段 1：完整标题搜索
+            const fullTitleToSearch = primaryTitle ? primaryTitle.replace(/\s+/g, ' ').trim() : null;
+            let fullTitleResult = null;
+            
+            // 缓存页数信息到 titleElement 供后续搜索使用（页数已在前面提取过）
+            if (ehPagecount !== null && titleElement) {
+                titleElement.dataset.ehPagecount = ehPagecount;
+                console.log(`[LRR Checker] 缓存页数到 titleElement: ${ehPagecount}`);
+            }
+            
+            if (fullTitleToSearch) {
+                console.log(`[LRR Checker] Step 2a: Trying full title search (Phase 1 insurance): ${fullTitleToSearch}`);
+                
+                // 创建页数 validator（如果启用了页数匹配）
+                let pagecountValidator = null;
+                if (CONFIG.enablePagecountMatching && ehPagecount !== null) {
+                    pagecountValidator = createPagecountValidator(ehPagecount, CONFIG.pagecountTolerance);
+                    console.log(`[LRR Checker] Step 2a: 页数验证已启用，e-hentai页数=${ehPagecount}, 误差范围=±${CONFIG.pagecountTolerance}`);
+                }
+                
+                fullTitleResult = await performAlternativeSearch(fullTitleToSearch, titleElement, galleryUrl, { 
+                    skipCache: true,
+                    validator: pagecountValidator 
+                });
+                
+                if (fullTitleResult.success && fullTitleResult.count === 1) {
+                    console.log(`[LRR Checker] ✓ 完整${shouldSearchGnFirst ? '#gn' : '#gj'}标题搜索成功（标题+页数匹配）`);
+                    const result = { success: 1, data: { id: fullTitleResult.files[0].arcid }, method: 'full-title', isExactMatch: false };
+                    setCache(cacheKey, result);
+                    await handleResponse(result, titleElement, galleryUrl, [], cacheKey);
+                    return { success: true, galleryUrl, method: 'full-title' };
+                }
+            }
+            
+            // 如果优先标题搜索失败，尝试次优先标题（完整）
+            const secondaryTitleToSearch = secondaryTitle ? secondaryTitle.replace(/\s+/g, ' ').trim() : null;
+            if (secondaryTitleToSearch && secondaryTitleToSearch !== fullTitleToSearch) {
+                console.log(`[LRR Checker] Step 2b: Trying secondary full title search: ${secondaryTitleToSearch}`);
+                
+                // 创建页数 validator（如果启用了页数匹配）
+                let secondaryPagecountValidator = null;
+                if (CONFIG.enablePagecountMatching && ehPagecount !== null) {
+                    secondaryPagecountValidator = createPagecountValidator(ehPagecount, CONFIG.pagecountTolerance);
+                    console.log(`[LRR Checker] Step 2b: 页数验证已启用，e-hentai页数=${ehPagecount}, 误差范围=±${CONFIG.pagecountTolerance}`);
+                }
+                
+                const secondaryResult = await performAlternativeSearch(secondaryTitleToSearch, titleElement, galleryUrl, { 
+                    skipCache: true,
+                    validator: secondaryPagecountValidator 
+                });
+                
+                if (secondaryResult.success && secondaryResult.count === 1) {
+                    console.log(`[LRR Checker] ✓ 完整${shouldSearchGnFirst ? '#gj' : '#gn'}标题搜索成功（标题+页数匹配）`);
+                    const result = { success: 1, data: { id: secondaryResult.files[0].arcid }, method: 'full-title', isExactMatch: false };
+                    setCache(cacheKey, result);
+                    await handleResponse(result, titleElement, galleryUrl, [], cacheKey);
+                    return { success: true, galleryUrl, method: 'full-title' };
+                }
+            }
+            
+            // 如果两个完整标题都搜索失败，触发第 3 层（深度搜索）
+            console.log(`[LRR Checker] Step 2 完成，完整标题搜索失败，准备进入Step 3深度搜索`);
+            const result = { success: 0 };
+            setCache(cacheKey, result);
+            await handleResponse(result, titleElement, galleryUrl, [], cacheKey);
+            return { success: false, galleryUrl, method: 'none' };
+
         } catch (error) {
-            console.error(`[LRR Checker] Network error checking ${galleryUrl}:`, error);
-            let markerSpan = document.createElement('span');
-            markerSpan.classList.add('lrr-marker-span', 'lrr-marker-error');
-            setMarkerIcon(markerSpan, '⚠', 'LRR网络错误');
-            markerSpan.title = 'LRR网络错误，请稍后重试';
-            if (titleElement) titleElement.prepend(markerSpan);
+            console.error(`[LRR Checker] Error checking ${galleryUrl}:`, error);
+            setFinalMarker(titleElement, {
+                type: MARKER_TYPES.ERROR,
+                icon: '⚠',
+                label: 'LRR检查出错',
+                className: 'lrr-marker-error',
+                onClick: (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearGalleryCache(galleryUrl, null);
+                    const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                    refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                }
+            });
             return { success: false, galleryUrl, error };
         }
     }
@@ -787,7 +1110,7 @@
     // 监听 DOM 变化，处理动态添加的内容（适配无限滚动等功能）
     const observer = new MutationObserver((mutations) => {
         let hasNewGalleries = false;
-        
+
         for (const mutation of mutations) {
             if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                 for (const node of mutation.addedNodes) {
@@ -835,7 +1158,7 @@
         if (menuData.header) {
             const header = document.createElement('div');
             header.className = 'lrr-popup-header';
-            
+
             // 添加刷新按钮到标题行（左侧）
             if (menuData.refreshCallback) {
                 const refreshBtn = document.createElement('button');
@@ -850,12 +1173,12 @@
                 };
                 header.appendChild(refreshBtn);
             }
-            
+
             const headerText = document.createElement('span');
             headerText.className = 'lrr-popup-header-text';
             headerText.textContent = menuData.header;
             header.appendChild(headerText);
-            
+
             menu.appendChild(header);
         }
 
@@ -880,20 +1203,22 @@
                     if (item.thumbnailUrl) {
                     const img = document.createElement('img');
                     img.className = 'lrr-popup-item-thumbnail';
-                    
+
                     if (item.thumbnailData) {
                         // 如果已经有 Base64 数据，直接使用
                         img.src = item.thumbnailData;
                     } else {
                         // 显示加载占位符（使用灰色方块避免 Mixed Content）
                         img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODAiIGhlaWdodD0iODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjgwIiBoZWlnaHQ9IjgwIiBmaWxsPSIjZGRkIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuWKoOi9veS4rS4uLjwvdGV4dD48L3N2Zz4=';
-                        
-                        // 异步加载缩略图
-                        fetchThumbnail(item.thumbnailUrl).then(dataUrl => {
+
+                        // 异步加载缩略图（从 thumbnailUrl 中提取 archiveId）
+                        const archiveIdMatch = item.thumbnailUrl ? item.thumbnailUrl.match(/\/archives\/([^/]+)\//) : null;
+                        const archiveId = archiveIdMatch ? archiveIdMatch[1] : null;
+                        fetchThumbnail(item.thumbnailUrl, archiveId).then(dataUrl => {
                             if (dataUrl) {
                                 console.log(`[LRR Checker] Updating img.src with base64 data, length: ${dataUrl.length}`);
                                 console.log(`[LRR Checker] Data URL starts with:`, dataUrl.substring(0, 50));
-                                
+
                                 // 测试图片是否能加载
                                 const testImg = new Image();
                                 testImg.onload = () => {
@@ -913,7 +1238,7 @@
                             console.error(`[LRR Checker] Error in fetchThumbnail promise:`, error);
                         });
                     }
-                    
+
                     menuItem.appendChild(img);
                 }
 
@@ -934,7 +1259,7 @@
                     text.classList.add('lrr-popup-id');
                 }
                 content.appendChild(text);
-                
+
                 // 添加页数信息
                 if (item.pagecount) {
                     const pagecount = document.createElement('span');
@@ -957,14 +1282,14 @@
                 menu.remove();
                 return;
             }
-            
+
             const rect = markerSpan.getBoundingClientRect();
             const menuWidth = menu.offsetWidth;
             const menuHeight = menu.offsetHeight;
-            
+
             // 左对齐标记
             let left = rect.left;
-            
+
             // 确保不超出右边界
             if (left + menuWidth > window.innerWidth - 10) {
                 left = window.innerWidth - menuWidth - 10;
@@ -973,23 +1298,23 @@
             if (left < 10) {
                 left = 10;
             }
-            
+
             // 在标记上方显示
             let top = rect.top - menuHeight - 5;
-            
+
             // 如果上方空间不够，显示在下方
             if (top < 10) {
                 top = rect.bottom + 5;
             }
-            
+
             menu.style.left = left + 'px';
             menu.style.top = top + 'px';
         };
-        
+
         // 初始定位
         menu.style.visibility = 'hidden';
         menu.style.display = 'block';
-        
+
         requestAnimationFrame(() => {
             positionMenu();
             menu.style.visibility = 'visible';
@@ -999,7 +1324,7 @@
         // 监听滚动和窗口大小变化，重新定位
         const handleScroll = () => positionMenu();
         const handleResize = () => positionMenu();
-        
+
         window.addEventListener('scroll', handleScroll, { passive: true });
         window.addEventListener('resize', handleResize);
 
@@ -1012,7 +1337,7 @@
                 window.removeEventListener('resize', handleResize);
             }, 300);
         };
-        
+
         const cancelHideTimer = () => {
             if (hideTimer) {
                 clearTimeout(hideTimer);
@@ -1026,9 +1351,15 @@
     }
 
     // 获取缩略图（使用 GM_xmlhttpRequest 带认证）
-    async function fetchThumbnail(thumbnailUrl) {
+    async function fetchThumbnail(thumbnailUrl, archiveId) {
+        // 检查缓存
+        if (archiveId && thumbnailCache[archiveId]) {
+            console.log(`[LRR Checker] Using cached thumbnail for: ${archiveId}`);
+            return thumbnailCache[archiveId];
+        }
+
         console.log(`[LRR Checker] Fetching thumbnail: ${thumbnailUrl}`);
-        
+
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -1040,7 +1371,7 @@
                 onload: (response) => {
                     try {
                         console.log(`[LRR Checker] Thumbnail response received`);
-                        
+
                         // 将 ArrayBuffer 转换为 Base64
                         const bytes = new Uint8Array(response.response);
                         console.log(`[LRR Checker] Got ${bytes.length} bytes`);
@@ -1050,15 +1381,21 @@
                             resolve(null);
                             return;
                         }
-                        
+
                         // 创建 Blob
                         const blob = new Blob([bytes], { type: 'image/jpeg' });
-                        
+
                         // 使用 FileReader 转换为 Data URL
                         const reader = new FileReader();
                         reader.onloadend = () => {
                             console.log(`[LRR Checker] Thumbnail converted to base64 successfully`);
-                            resolve(reader.result);
+                            const dataUrl = reader.result;
+                            // 缓存结果
+                            if (archiveId) {
+                                thumbnailCache[archiveId] = dataUrl;
+                                console.log(`[LRR Checker] Thumbnail cached for: ${archiveId}`);
+                            }
+                            resolve(dataUrl);
                         };
                         reader.onerror = () => {
                             console.error('[LRR Checker] Error converting thumbnail to base64');
@@ -1103,14 +1440,139 @@
     }
 
     // 将备用搜索也改为Promise方式
+    // 从 e-hentai 搜索页面提取画廊页数
+    function extractEhPagecount(titleElement) {
+        if (!titleElement) {
+            console.log('[LRR Checker] extractEhPagecount: titleElement 为空');
+            return null;
+        }
+
+        // 向上查找到 .gl1t 容器（搜索结果条目的根）
+        let gl1tElement = titleElement;
+        while (gl1tElement && !gl1tElement.classList?.contains?.('gl1t')) {
+            gl1tElement = gl1tElement.parentElement;
+        }
+
+        if (!gl1tElement) {
+            console.log('[LRR Checker] extractEhPagecount: 未找到 .gl1t 容器');
+            return null;
+        }
+
+        // 在 .gl1t 内找到 .gl5t 子元素
+        const gl5tElement = gl1tElement.querySelector('.gl5t');
+        if (!gl5tElement) {
+            console.log('[LRR Checker] extractEhPagecount: 未找到 .gl5t 子元素');
+            return null;
+        }
+
+        console.log('[LRR Checker] extractEhPagecount: 找到 .gl5t 容器，开始查找页数...');
+
+        // 查找页数文本 "50 pages" 的 div
+        // 结构: .gl5t > div > div (第二个 div 包含页数)
+        const allDivs = gl5tElement.querySelectorAll(':scope > div > div');
+        console.log(`[LRR Checker] extractEhPagecount: 在 .gl5t 中检查 ${allDivs.length} 个 div 元素`);
+
+        // 优化：使用 find() 查找第一个匹配的元素，找到即停止
+        const pagecountDiv = Array.from(allDivs).find(div => {
+            const text = div.textContent.trim();
+            // 查找格式为 "50 pages" 或 "50 page" 或 "50 页" 的文本
+            return /^\d+\s+(pages?|页)$/i.test(text);
+        });
+
+        if (pagecountDiv) {
+            const match = pagecountDiv.textContent.trim().match(/(\d+)\s+(pages?|页)/i);
+            if (match) {
+                const pagecount = parseInt(match[1], 10);
+                console.log(`[LRR Checker] extractEhPagecount: 找到页数 ${pagecount}`);
+                return pagecount;
+            }
+        }
+
+        console.log('[LRR Checker] extractEhPagecount: 未找到页数信息');
+        return null;
+    }
+
+    // 创建页数匹配 validator
+    function createPagecountValidator(ehPagecount, tolerance) {
+        if (ehPagecount === null || ehPagecount === undefined || tolerance === null || tolerance === undefined) {
+            console.log(`[LRR Checker] createPagecountValidator: 参数无效 (pagecount=${ehPagecount}, tolerance=${tolerance})`);
+            return null;
+        }
+
+        console.log(`[LRR Checker] createPagecountValidator: 创建 validator，e-hentai页数=${ehPagecount}, 误差范围=±${tolerance}`);
+
+        return (file) => {
+            if (!file || !file.pagecount) {
+                console.log(`[LRR Checker] pagecount validator: 跳过（无页数数据）`);
+                return true; // 无页数数据时不过滤
+            }
+            const diff = Math.abs(file.pagecount - ehPagecount);
+            const pass = diff <= tolerance;
+            console.log(`[LRR Checker] pagecount validator: "${file.title}" - ${file.pagecount}页 vs ${ehPagecount}页, 差值=${diff}, 结果=${pass ? '通过' : '过滤'}`);
+            return pass;
+        };
+    }
+
     async function performAlternativeSearch(searchQuery, titleElement, galleryUrl, options = {}) {
         const normalizedOptions = typeof options === 'boolean' ? { skipCache: options } : options;
-        const {
+        let {
             skipCache = false,
             disableStore = false,
             precision = 'normal',
             validator = null
         } = normalizedOptions;
+
+        // 页数匹配：如果启用，则创建页数 validator
+        // 注意：页数已在 processGallery() 中预先提取过，这里检查是否需要重新提取
+        let pagecountValidator = null;
+        if (CONFIG.enablePagecountMatching) {
+            console.log('[LRR Checker] performAlternativeSearch: 页数匹配已启用');
+            // 由于页数已在 processGallery() 中预提取，这里只在必要时重新提取（深度搜索）
+            let ehPagecount = null;
+            
+            // 尝试从 titleElement 获取已缓存的页数（通过 data 属性）
+            if (titleElement && titleElement.dataset && titleElement.dataset.ehPagecount) {
+                ehPagecount = parseInt(titleElement.dataset.ehPagecount, 10);
+                console.log(`[LRR Checker] 使用已缓存的页数: ${ehPagecount}`);
+            } else {
+                // 如果没有缓存，则重新提取（通常只在深度搜索时发生）
+                ehPagecount = extractEhPagecount(titleElement);
+                if (ehPagecount !== null && titleElement) {
+                    titleElement.dataset.ehPagecount = ehPagecount;
+                }
+            }
+            
+            if (ehPagecount !== null) {
+                pagecountValidator = createPagecountValidator(ehPagecount, CONFIG.pagecountTolerance);
+                console.log(`[LRR Checker] performAlternativeSearch: 页数 validator 已创建`);
+            } else {
+                console.log('[LRR Checker] performAlternativeSearch: 未能提取到页数');
+            }
+        } else {
+            console.log('[LRR Checker] performAlternativeSearch: 页数匹配已禁用');
+        }
+
+        // 如果有页数 validator，与现有 validator 组合
+        if (pagecountValidator) {
+            console.log('[LRR Checker] performAlternativeSearch: 应用页数 validator');
+            const originalValidator = validator;
+            validator = (file) => {
+                // 页数 validator 必须通过
+                if (!pagecountValidator(file)) {
+                    console.log(`[LRR Checker] combined validator: 页数过滤不通过 "${file.title}"`);
+                    return false;
+                }
+                // 如果还有其他 validator，也要通过
+                if (originalValidator && !originalValidator(file)) {
+                    console.log(`[LRR Checker] combined validator: 其他过滤不通过 "${file.title}"`);
+                    return false;
+                }
+                console.log(`[LRR Checker] combined validator: 全部通过 "${file.title}"`);
+                return true;
+            };
+        } else if (validator) {
+            console.log('[LRR Checker] performAlternativeSearch: 无页数 validator，仅使用其他过滤');
+        }
 
         // 确保搜索标记存在（防止被其他脚本移除）
         ensureSearchingMarker(titleElement);
@@ -1121,17 +1583,40 @@
             if (cachedResult.success && cachedResult.count > 0) {
                 console.log(`[LRR Checker] Using cached search result for: ${searchQuery}`);
                 // 使用缓存的结果，但仍需创建标记
-                const matchCount = cachedResult.count;
-                const matchedFiles = cachedResult.files;
-                
+                let matchedFiles = cachedResult.files;
+                let matchCount = cachedResult.count;
+
+                // 重新应用 validator（如果存在）
+                if (validator) {
+                    console.log(`[LRR Checker] 对缓存结果应用 validator，缓存数: ${matchCount}`);
+                    const validated = matchedFiles.filter(file => validator(file));
+                    console.log(`[LRR Checker] 缓存结果 validator 过滤: ${matchCount} -> ${validated.length}`);
+                    matchedFiles = validated;
+                    matchCount = validated.length;
+
+                    // 如果 validator 过滤后无结果，视为未找到
+                    if (matchCount === 0) {
+                        console.log(`[LRR Checker] 缓存结果被 validator 全部过滤，视为未找到`);
+                        const searchingMarker = titleElement.querySelector('.lrr-marker-span[data-is-searching="true"]');
+                        if (searchingMarker) {
+                            cleanupMarker(searchingMarker);
+                            searchingMarker.remove();
+                        }
+                        return { success: false, searchQuery, count: 0 };
+                    }
+                }
+
                 // 删除搜索标记
                 const searchingMarker = titleElement.querySelector('.lrr-marker-span[data-is-searching="true"]');
                 if (searchingMarker) {
                     cleanupMarker(searchingMarker);
                     searchingMarker.remove();
                 }
-                
-                if (matchCount === 1 && !titleElement.querySelector('.lrr-marker-span')) {
+
+                console.log(`[LRR Checker] 缓存结果处理：matchCount=${matchCount}，检查是否需要标记`);
+
+                if (matchCount === 1) {
+                    console.log(`[LRR Checker] 缓存单个匹配，创建标记`);
                     const archiveTitle = matchedFiles[0].title;
                     const archiveId = matchedFiles[0].arcid;
                     let altMarkerSpan = document.createElement('span');
@@ -1159,7 +1644,10 @@
                         }
                     });
                     titleElement.prepend(altMarkerSpan);
-                } else if (matchCount > 1 && !titleElement.querySelector('.lrr-marker-span')) {
+                } else if (matchCount > 1) {
+                    console.log(`[LRR Checker] 缓存多个匹配，创建可能匹配标记`);
+                    // 清除旧标记再添加新标记
+                    clearAllMarkers(titleElement);
                     let altMarkerSpan = document.createElement('span');
                     altMarkerSpan.classList.add('lrr-marker-span');
                     setMarkerIcon(altMarkerSpan, `?${matchCount}`, `LRR发现${matchCount}个可能匹配`);
@@ -1191,42 +1679,17 @@
                             };
                         }
                     });
-                    titleElement.prepend(altMarkerSpan);
                 }
+                // 缓存结果直接返回，让handleResponse处理标记
                 return cachedResult;
             } else if (cachedResult.success === false) {
                 // 使用缓存的未找到结果，直接返回而不是重新搜索
                 console.log(`[LRR Checker] Using cached not-found result: ${searchQuery}`);
-                
-                // 删除搜索标记
-                const searchingMarker = titleElement.querySelector('.lrr-marker-span[data-is-searching="true"]');
-                if (searchingMarker) {
-                    cleanupMarker(searchingMarker);
-                    searchingMarker.remove();
-                }
-                
-                // 添加未找到标记
-                if (!titleElement.querySelector('.lrr-marker-span')) {
-                    let notFoundSpan = document.createElement('span');
-                    notFoundSpan.classList.add('lrr-marker-span', 'lrr-marker-notfound');
-                    setMarkerIcon(notFoundSpan, '🔄', 'LRR未找到匹配，点击刷新');
-                    notFoundSpan.title = 'LRR未找到匹配，点击刷新缓存重新检查';
-                    registerMarker(notFoundSpan, {
-                        onClick: (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            clearGalleryCache(galleryUrl, searchQuery);
-                            const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
-                            refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
-                        }
-                    });
-                    titleElement.prepend(notFoundSpan);
-                }
-                
+                // 缓存结果直接返回，让handleResponse处理标记
                 return cachedResult;
             }
         }
-        
+
         const randomSearchUrl = `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodeURIComponent(searchQuery)}`;
         const headers = {};
         if (CONFIG.lrrApiKey) {
@@ -1247,103 +1710,74 @@
                     const matchedFiles = randomResult.data;
                     let effectiveFiles = matchedFiles;
                     let filteredApplied = false;
+
+                    // 调试：打印所有搜索结果
+                    console.log(`[LRR Checker] 搜索返回 ${matchCount} 个结果:`);
+                    matchedFiles.forEach((file, idx) => {
+                        console.log(`[LRR Checker]   ${idx + 1}. "${file.title || file.filename}" (${file.pagecount}页)`);
+                    });
+
                     if (validator) {
+                        console.log(`[LRR Checker] 准备应用 validator，搜索结果数: ${matchCount}`);
                         const validated = matchedFiles.filter(file => validator(file));
+                        console.log(`[LRR Checker] Validator 过滤结果: ${matchCount} -> ${validated.length}`);
                         if (validated.length > 0) {
                             effectiveFiles = validated;
                             filteredApplied = true;
-                            console.log(`[LRR Checker] Validator filtered ${matchCount} -> ${validated.length}`);
+                            console.log(`[LRR Checker] 使用过滤后的结果`);
+                        } else {
+                            console.log(`[LRR Checker] validator 过滤后无结果，视为搜索失败`);
+                            effectiveFiles = []; // 设为空数组，触发后续的"未找到"逻辑
+                            filteredApplied = true;
                         }
                     }
                     console.log(`[LRR Checker] Found ${effectiveFiles.length} result(s) via alternative search: ${searchQuery}`);
-                    
+
                     // 如果只有一个结果，直接标记
                     if (effectiveFiles.length === 1) {
-                        console.log(`[LRR Checker] Single match found, marking as found`);
-                        if (ensureMarkerSlot(titleElement, true)) {
-                            let altMarkerSpan = document.createElement('span');
-                            altMarkerSpan.classList.add('lrr-marker-span');
-                            setMarkerIcon(altMarkerSpan, '!', 'LRR找到匹配');
-                            altMarkerSpan.classList.add('lrr-marker-file');
-
-                            const archive = effectiveFiles[0];
-                            const archiveTitle = archive.title || 'Unknown';
-                            const archiveId = archive.arcid;
-                            registerMarker(altMarkerSpan, {
-                                menuBuilder: () => {
-                                    const readerUrl = `${CONFIG.lrrServerUrl}/reader?id=${archiveId}`;
-                                    const thumbnailUrl = `${CONFIG.lrrServerUrl}/api/archives/${archiveId}/thumbnail`;
-                                    return {
-                                        header: '已找到',
-                                        items: [
-                                            {
-                                                text: archiveTitle,
-                                                url: readerUrl,
-                                                thumbnailUrl: thumbnailUrl,
-                                                pagecount: archive.pagecount
-                                            }
-                                        ],
-                                        refreshCallback: () => {
-                                            clearGalleryCache(galleryUrl, searchQuery);
-                                            const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
-                                            refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
-                                        }
-                                    };
-                                }
-                            });
-                            titleElement.prepend(altMarkerSpan);
+                        // 检查是否是精确匹配（无 validator 应用，或只有单个结果通过 validator）
+                        const isExactMatch = !filteredApplied || matchedFiles.length === 1;
+                        
+                        if (!isExactMatch) {
+                            // 单个结果但页数不完全匹配，返回为备选
+                            console.log(`[LRR Checker] Single result but not exact match, treat as fallback`);
+                            const result = { success: false, searchQuery, count: 1, files: effectiveFiles, precision, filtered: filteredApplied };
+                            if (!disableStore) {
+                                cacheSearchResult(searchQuery, result);
+                            }
+                            return result;
                         }
+                        
+                        console.log(`[LRR Checker] Single exact match found, returning result`);
+                        
                         const result = { success: true, searchQuery, count: 1, files: effectiveFiles, precision, filtered: filteredApplied };
                         if (!disableStore) {
                             cacheSearchResult(searchQuery, result);
                         }
                         return result;
-                    } else {
-                        // 多个结果，标记为可能匹配
-                        console.log(`[LRR Checker] Multiple matches (${effectiveFiles.length}), needs manual verification`);
-                        if (ensureMarkerSlot(titleElement)) {
-                            let altMarkerSpan = document.createElement('span');
-                            altMarkerSpan.classList.add('lrr-marker-span');
-                            setMarkerIcon(altMarkerSpan, `?${effectiveFiles.length}`, `LRR发现${effectiveFiles.length}个可能匹配`);
-                            altMarkerSpan.classList.add('lrr-marker-multiple');
-                            registerMarker(altMarkerSpan, {
-                                menuBuilder: () => {
-                                    const items = [];
-                                    effectiveFiles.forEach((file, index) => {
-                                        const readerUrl = `${CONFIG.lrrServerUrl}/reader?id=${file.arcid}`;
-                                        const thumbnailUrl = `${CONFIG.lrrServerUrl}/api/archives/${file.arcid}/thumbnail`;
-                                        if (index > 0) {
-                                            items.push({ divider: true });
-                                        }
-                                        items.push({
-                                            text: `${index + 1}. ${file.title}`,
-                                            url: readerUrl,
-                                            thumbnailUrl: thumbnailUrl,
-                                            pagecount: file.pagecount
-                                        });
-                                    });
-                                    return {
-                                        header: `找到 ${matchCount} 个可能的匹配`,
-                                        items: items,
-                                        refreshCallback: () => {
-                                            clearGalleryCache(galleryUrl, searchQuery);
-                                            const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
-                                            refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
-                                        }
-                                    };
-                                }
-                            });
-                            titleElement.prepend(altMarkerSpan);
-                        }
-                        const result = { success: true, searchQuery, count: effectiveFiles.length, multiple: true, files: effectiveFiles, precision, filtered: filteredApplied };
-                        if (!disableStore) {
+                    } else if (effectiveFiles.length === 0) {
+                        // validator 过滤后无结果，这意味着没有结果在页数误差范围内
+                        // 不收集备选结果（因为根本没有符合条件的）
+                        console.log(`[LRR Checker] validator 过滤后无结果（超出页数误差范围）`);
+                        const result = { success: false, searchQuery, count: 0 };
+                        if (!disableStore && CONFIG.cacheNotFoundResults) {
                             cacheSearchResult(searchQuery, result);
                         }
                         return result;
+                    } else {
+                        // 多个结果，收集为备选，继续后续搜索而不立即显示
+                        console.log(`[LRR Checker] Multiple matches (${effectiveFiles.length}) found in phase 1, collecting as fallback for further search`);
+                        const result = { success: false, searchQuery, count: effectiveFiles.length, files: effectiveFiles, precision, filtered: filteredApplied };
+                        if (!disableStore) {
+                            cacheSearchResult(searchQuery, result);
+                        }
+                        // 不立即显示 ?N，返回 success: false 让脚本继续后续搜索
+                        return result;
+                        
                     }
                 } else {
                     console.log(`[LRR Checker] Not found via alternative search: ${searchQuery}`);
-                    
+
                     // 不在这里添加最终标记，让调用方决定是否继续其他搜索
                     // 只缓存结果并返回
                     const result = { success: false, searchQuery, count: 0 };
@@ -1363,33 +1797,118 @@
                 responseText: error?.response?.responseText?.substring(0, 100) || null,
                 errorMessage: error?.message
             });
-            return { success: false, searchQuery, error };
+            // 返回错误结果，标记为网络错误（不是搜索无结果）
+            return { success: false, searchQuery, isNetworkError: true, error };
         }
     }
 
-    function isFinalMarker(marker) {
-        return marker.classList.contains('lrr-marker-downloaded') ||
-            marker.classList.contains('lrr-marker-file') ||
-            marker.classList.contains('lrr-marker-multiple');
-    }
-
-    function removeTemporaryMarker(titleElement) {
+    // ===== 统一标记管理API（集中式管理） =====
+    
+    // 获取当前标记信息
+    function getCurrentMarker(titleElement) {
+        if (!titleElement) return null;
         const marker = titleElement.querySelector('.lrr-marker-span');
-        // 保护搜索标记和最终标记
-        if (marker && !isFinalMarker(marker) && !marker.dataset.isSearching) {
+        if (!marker) return null;
+        
+        let type = null;
+        // 优先检查data-markerType（由setFinalMarker设置）
+        if (marker.dataset.markerType) {
+            type = marker.dataset.markerType;
+        } else if (marker.dataset.isSearching === 'true') {
+            type = MARKER_TYPES.SEARCHING;
+        } else if (marker.classList.contains('lrr-marker-downloaded')) {
+            type = MARKER_TYPES.FOUND;
+        } else if (marker.classList.contains('lrr-marker-file')) {
+            type = MARKER_TYPES.PARTIAL;
+        } else if (marker.classList.contains('lrr-marker-multiple')) {
+            type = MARKER_TYPES.MULTIPLE;
+        } else if (marker.classList.contains('lrr-marker-error')) {
+            type = MARKER_TYPES.ERROR;
+        } else {
+            // 默认认为是未找到
+            type = MARKER_TYPES.NOT_FOUND;
+        }
+        
+        return {
+            type,
+            isFinal: type !== MARKER_TYPES.SEARCHING,
+            element: marker,
+            icon: marker.dataset.icon || ''
+        };
+    }
+    
+    // 检查是否已有最终标记
+    function hasFinalMarker(titleElement) {
+        const current = getCurrentMarker(titleElement);
+        return current && current.isFinal;
+    }
+    
+    // 清理所有标记
+    function clearAllMarkers(titleElement) {
+        if (!titleElement) return;
+        const markers = titleElement.querySelectorAll('.lrr-marker-span');
+        markers.forEach(marker => {
             cleanupMarker(marker);
             marker.remove();
-            return true;
+        });
+    }
+    
+    // 设置搜索中标记（临时标记）
+    function setSearchingMarker(titleElement) {
+        if (!titleElement) return;
+        
+        // 清理所有现有标记
+        clearAllMarkers(titleElement);
+        
+        // 添加搜索中标记
+        let searchingMarker = document.createElement('span');
+        searchingMarker.classList.add('lrr-marker-span', 'lrr-marker-searching');
+        searchingMarker.dataset.isSearching = 'true';
+        setMarkerIcon(searchingMarker, '⏳', 'LRR搜索中...');
+        titleElement.prepend(searchingMarker);
+        console.log('[LRR Checker] Set searching marker (⏳)');
+    }
+    
+    // 设置最终标记
+    function setFinalMarker(titleElement, config) {
+        if (!titleElement || !config) return;
+        
+        const { type, icon, label, className, menuBuilder, onClick } = config;
+        
+        // 如果已有最终标记，不覆盖
+        const current = getCurrentMarker(titleElement);
+        if (current && current.isFinal) {
+            console.log(`[LRR Checker] Final marker already exists (${current.type}), skipping: ${icon}`);
+            return;
         }
-        return false;
+        
+        // 清理所有旧标记（包括临时标记）
+        clearAllMarkers(titleElement);
+        
+        // 创建新标记
+        let markerSpan = document.createElement('span');
+        markerSpan.classList.add('lrr-marker-span', className || '');
+        markerSpan.dataset.markerType = type;
+        setMarkerIcon(markerSpan, icon, label);
+        
+        // 注册菜单或点击处理
+        if (menuBuilder || onClick) {
+            registerMarker(markerSpan, { menuBuilder, onClick });
+        }
+        
+        titleElement.prepend(markerSpan);
+        console.log(`[LRR Checker] Set final marker: ${icon} (${type})`);
     }
 
-    // 移除所有非搜索标记（包括最终标记），用于deep search时替换更精确的结果
+    // ===== 向后兼容性包装（旧API的兼容实现） =====
+    // 这些函数保留用于兼容现有代码，新代码应使用上面的新API
+    
     function removeAllMarkers(titleElement, keepSearching = false) {
+        if (!titleElement) return false;
         const markers = titleElement.querySelectorAll('.lrr-marker-span');
         let removed = 0;
         markers.forEach(marker => {
-            if (keepSearching && marker.dataset.isSearching) {
+            if (keepSearching && marker.dataset.isSearching === 'true') {
                 return; // 保留搜索标记
             }
             cleanupMarker(marker);
@@ -1399,31 +1918,21 @@
         return removed > 0;
     }
 
-    // 确保搜索标记存在（防止被其他脚本移除）
     function ensureSearchingMarker(titleElement) {
-        const existing = titleElement.querySelector('.lrr-marker-span[data-is-searching="true"]');
-        if (!existing) {
-            // 搜索标记被移除了，重新添加
-            let searchingMarker = document.createElement('span');
-            searchingMarker.classList.add('lrr-marker-span', 'lrr-marker-searching');
-            searchingMarker.dataset.isSearching = 'true';
-            setMarkerIcon(searchingMarker, '⏳', 'LRR搜索中...');
-            titleElement.prepend(searchingMarker);
-            console.log('[LRR Checker] Re-added searching marker (was removed by external script)');
+        // 兼容实现：如果没有搜索标记，添加一个
+        const current = getCurrentMarker(titleElement);
+        if (!current || current.type !== MARKER_TYPES.SEARCHING) {
+            setSearchingMarker(titleElement);
         }
     }
 
-    // 允许用更精确的结果覆盖之前的多匹配标记
     function ensureMarkerSlot(titleElement, allowReplace = false) {
+        // 兼容实现：如果没有标记或可以替换，返回true
         if (!titleElement) return false;
-        const existing = titleElement.querySelector('.lrr-marker-span');
-        if (!existing) return true;
-        // 总是允许替换搜索中的标记或多结果标记
-        if (existing.dataset.isSearching || (allowReplace && existing.classList.contains('lrr-marker-multiple'))) {
-            cleanupMarker(existing);
-            existing.remove();
-            return true;
-        }
+        const current = getCurrentMarker(titleElement);
+        if (!current) return true;
+        if (current.type === MARKER_TYPES.SEARCHING) return true;
+        if (allowReplace && current.type === MARKER_TYPES.MULTIPLE) return true;
         return false;
     }
 
@@ -1438,130 +1947,250 @@
         }
     }
 
-    async function handleResponse(result, titleElement, galleryUrl) {
-        // 检查是否已经有标记
-        const existingMarker = titleElement.querySelector('.lrr-marker-span');
-        if (existingMarker) {
-            if (isFinalMarker(existingMarker)) {
-                console.log(`[LRR Checker] Existing final marker detected, skipping re-render for: ${galleryUrl}`);
-                return;
-            }
-            console.log(`[LRR Checker] Removing stale marker before re-render: ${galleryUrl}`);
-            cleanupMarker(existingMarker);
-            existingMarker.remove();
-        }
+    async function handleResponse(result, titleElement, galleryUrl, fallbackResults = [], cacheKey = null) {
+        // 注意：processGallery已在开始时显示⏳，我们只需设置最终图标
+        // 不需要检查是否有最终标记，因为流程保证只调用一次
 
-        let markerSpan = document.createElement('span');
-        markerSpan.classList.add('lrr-marker-span');
+        if (result.success === 1 || result.success === true) {
+            console.log(`[LRR Checker] Found: ${galleryUrl}`);
+            // 兼容两种格式：gid/token搜索返回 { success: 1, data: {...} }，
+            // performAlternativeSearch返回 { success: true, files: [...] }
+            
+            // 根据 isExactMatch 判断是否为精确匹配
+            const isExactMatch = result.isExactMatch === true;
+            
+            // 兼容两种格式：
+            // 1. gid/token搜索: result.data.id
+            // 2. performAlternativeSearch: result.files[0].arcid
+            const archiveId = result.data ? result.data.id : (result.files && result.files[0] ? result.files[0].arcid : null);
+            const archiveTitle_initial = result.files && result.files[0] ? result.files[0].title : '加载中...';
+            const archivePagecount_initial = result.files && result.files[0] ? result.files[0].pagecount : null;
 
-        if (result.success === 1) {
-            console.log(`[LRR Checker] Found: ${galleryUrl} (ID: ${result.data.id})`);
-            console.log(`[LRR Checker] Archive data:`, result.data);
-            setMarkerIcon(markerSpan, '✓', 'LRR已收录');
-            markerSpan.classList.add('lrr-marker-downloaded');
-            
-            // urlfinder 插件只返回 id，需要获取完整信息
-            const archiveId = result.data.id;
-            
             // 添加悬停事件
-            let archiveTitle = '加载中...';
-            let archivePagecount = null;
-            registerMarker(markerSpan, {
-                menuBuilder: () => {
-                    const readerUrl = `${CONFIG.lrrServerUrl}/reader?id=${archiveId}`;
-                    const thumbnailUrl = `${CONFIG.lrrServerUrl}/api/archives/${archiveId}/thumbnail`;
-                    return {
-                        header: '已存档',
-                        items: [
-                            {
-                                text: archiveTitle,
-                                url: readerUrl,
-                                thumbnailUrl: thumbnailUrl,
-                                pagecount: archivePagecount
-                            }
-                        ],
-                        refreshCallback: () => {
-                            clearGalleryCache(galleryUrl, null);
-                            const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
-                            refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+            let archiveTitle = archiveTitle_initial;
+            let archivePagecount = archivePagecount_initial;
+            
+            // 创建菜单构建函数
+            const menuBuilder = () => {
+                const readerUrl = `${CONFIG.lrrServerUrl}/reader?id=${archiveId}`;
+                const thumbnailUrl = `${CONFIG.lrrServerUrl}/api/archives/${archiveId}/thumbnail`;
+                return {
+                    header: '已存档',
+                    items: [
+                        {
+                            text: archiveTitle,
+                            url: readerUrl,
+                            thumbnailUrl: thumbnailUrl,
+                            pagecount: archivePagecount
                         }
-                    };
-                }
-            });
+                    ],
+                    refreshCallback: () => {
+                        clearGalleryCache(galleryUrl, null);
+                        const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                        refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                    }
+                };
+            };
             
-            titleElement.prepend(markerSpan);
-            
+            // 使用setFinalMarker统一处理标记
+            if (isExactMatch) {
+                console.log(`[LRR Checker] 精确匹配 - 显示 ✓`);
+                setFinalMarker(titleElement, {
+                    type: MARKER_TYPES.FOUND,
+                    icon: '✓',
+                    label: 'LRR已收录',
+                    className: 'lrr-marker-downloaded',
+                    menuBuilder: menuBuilder
+                });
+            } else {
+                console.log(`[LRR Checker] 非精确匹配（备选结果）- 显示 !`);
+                setFinalMarker(titleElement, {
+                    type: MARKER_TYPES.PARTIAL,
+                    icon: '!',
+                    label: 'LRR可能有匹配',
+                    className: 'lrr-marker-file',
+                    menuBuilder: menuBuilder
+                });
+            }
+
             // 异步获取存档详细信息
             fetchArchiveInfo(archiveId).then(archiveInfo => {
                 if (archiveInfo && archiveInfo.title) {
                     archiveTitle = archiveInfo.title;
                     archivePagecount = archiveInfo.pagecount;
                     console.log(`[LRR Checker] Archive info updated: ${archiveTitle}, pages: ${archivePagecount}`);
+                    
+                    // 更新缓存，添加archiveTitle和archivePagecount
+                    if (cacheKey) {
+                        const updatedCacheData = { 
+                            ...result,
+                            archiveTitle: archiveInfo.title,
+                            archivePagecount: archiveInfo.pagecount
+                        };
+                        setCache(cacheKey, updatedCacheData);
+                        console.log(`[LRR Checker] Updated cache with archive info`);
+                    }
                 }
             }).catch(error => {
                 console.error(`[LRR Checker] Error fetching archive info:`, error);
             });
+        } else if (result.isNetworkError === true) {
+            // 网络错误（LRR 服务器无法连接）
+            console.log(`[LRR Checker] Network error occurred when searching: ${galleryUrl}`);
+            setFinalMarker(titleElement, {
+                type: MARKER_TYPES.ERROR,
+                icon: '⚠️',
+                label: 'LRR连接失败',
+                className: 'lrr-marker-error',
+                onClick: (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // 网络错误不应该缓存，直接清除缓存重试
+                    clearGalleryCache(galleryUrl, '');
+                    const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                    refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                }
+            })
         } else {
             console.log(`[LRR Checker] Not found or error: ${galleryUrl} - ${result.error}`);
-            
-            // 立即显示⏳标记，让用户知道正在搜索
-            let searchingMarker = document.createElement('span');
-            searchingMarker.classList.add('lrr-marker-span', 'lrr-marker-searching');
-            searchingMarker.dataset.isSearching = 'true'; // 标记为搜索状态
-            setMarkerIcon(searchingMarker, '⏳', 'LRR搜索中...');
-            titleElement.prepend(searchingMarker);
-            console.log('[LRR Checker] Added searching marker (⏳)');
+
+            // ⏳标记已在processGallery开始时显示，此处不需要重复设置
+            // 直接进入深度搜索流程（如果启用）
             
             // 去除可能已存在的标记（如 ⏳, !, ✓ 等）
             const fullTitle = titleElement.textContent.replace(/^[⏳🔄!✓⚠?✗]\d*\s*/, '').trim();
             const { author, title } = extractAuthorAndTitle(fullTitle);
-            const coreTokenInfo = extractCoreToken(title);
+            const coreTokenInfo = extractCoreToken(title || fullTitle);
             const coreToken = coreTokenInfo ? coreTokenInfo.token : null;
-            const titleDateToken = extractDateToken(title);
-            const removeExistingMarker = () => {
-                const existingMarker = titleElement.querySelector('.lrr-marker-span');
-                // 保留搜索标记，删除其他标记（中间不会有最终标记）
-                if (existingMarker && !existingMarker.dataset.isSearching) {
-                    cleanupMarker(existingMarker);
-                    existingMarker.remove();
-                }
-            };
-            
+            const titleDateToken = extractDateToken(title || fullTitle);
+
             console.log(`[LRR Checker] Extracted - Author: "${author}", Title: "${title}"`);
-            
+
             if (!author) {
                 // 没有作者信息，尝试深度搜索
+                if (!CONFIG.enableDeepSearch) {
+                    console.log(`[LRR Checker] Deep search disabled, skipping for: ${fullTitle}`);
+                    setFinalMarker(titleElement, {
+                        type: MARKER_TYPES.NOT_FOUND,
+                        icon: '🔄',
+                        label: 'LRR未找到',
+                        className: 'lrr-marker-notfound',
+                        onClick: (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            clearGalleryCache(galleryUrl, null);
+                            const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                            refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                        }
+                    });
+                    return;
+                }
                 console.log(`[LRR Checker] No author in title, trying deep search: ${fullTitle}`);
-                await performDeepSearch(galleryUrl, titleElement, fullTitle);
+                await performDeepSearch(galleryUrl, titleElement, fullTitle, new Set(), cacheKey);
                 return;
             }
 
             if (author === title || title === null) {
                 console.log(`[LRR Checker] Invalid title format, trying deep search: ${fullTitle}`);
-                await performDeepSearch(galleryUrl, titleElement, fullTitle);
+                if (!CONFIG.enableDeepSearch) {
+                    console.log(`[LRR Checker] Deep search disabled, stopping search for: ${fullTitle}`);
+                    // 检查是否有备选结果（页数在误差范围内的）
+                    if (fallbackResults.length > 0) {
+                        console.log(`[LRR Checker] Found ${fallbackResults.length} fallback result(s) within pagecount tolerance`);
+                        if (fallbackResults.length === 1) {
+                            // 只有1个备选，显示为不完全匹配
+                            const fallbackFile = fallbackResults[0];
+                            setFinalMarker(titleElement, {
+                                type: MARKER_TYPES.PARTIAL,
+                                icon: '!',
+                                label: 'LRR找到可能匹配（页数不完全符合）',
+                                className: 'lrr-marker-file',
+                                menuBuilder: () => ({
+                                    header: '可能匹配',
+                                    items: [{
+                                        text: fallbackFile.title,
+                                        url: `${CONFIG.lrrServerUrl}/reader?id=${fallbackFile.arcid}`,
+                                        thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${fallbackFile.arcid}/thumbnail`,
+                                        pagecount: fallbackFile.pagecount
+                                    }]
+                                })
+                            });
+                        } else {
+                            // 多个备选，显示?N
+                            setFinalMarker(titleElement, {
+                                type: MARKER_TYPES.MULTIPLE,
+                                icon: `?${fallbackResults.length}`,
+                                label: `LRR发现${fallbackResults.length}个可能匹配`,
+                                className: 'lrr-marker-multiple',
+                                menuBuilder: () => {
+                                    const items = [];
+                                    fallbackResults.forEach((file, index) => {
+                                        if (index > 0) items.push({ divider: true });
+                                        items.push({
+                                            text: `${index + 1}. ${file.title}`,
+                                            url: `${CONFIG.lrrServerUrl}/reader?id=${file.arcid}`,
+                                            thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${file.arcid}/thumbnail`,
+                                            pagecount: file.pagecount
+                                        });
+                                    });
+                                    return { header: `找到 ${fallbackResults.length} 个可能的匹配`, items };
+                                }
+                            });
+                        }
+                    } else {
+                        // 没有备选结果，显示未找到
+                        console.log(`[LRR Checker] No results found within pagecount tolerance`);
+                        setFinalMarker(titleElement, {
+                            type: MARKER_TYPES.NOT_FOUND,
+                            icon: '🔄',
+                            label: 'LRR未找到',
+                            className: 'lrr-marker-notfound',
+                            onClick: (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                clearGalleryCache(galleryUrl, null);
+                                const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                                refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                            }
+                        });
+                    }
+                    return;
+                }
+                await performDeepSearch(galleryUrl, titleElement, fullTitle, new Set(), cacheKey);
                 return;
             }
 
-            // 多级搜索策略
+            // 尝试提取标题的第一部分
             const searchQuery = `${author},${title}`;
             console.log(`[LRR Checker] Trying alternative search with: ${searchQuery}`);
 
             // 第一次尝试：作者 + 完整标题
             let searchResult = await performAlternativeSearch(searchQuery, titleElement, galleryUrl);
             if (searchResult.success && searchResult.count === 1) {
-                return; // 只有一个结果，确定匹配
+                // 找到单个结果，调用handleResponse设置最终标记
+                await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
             }
-            
-            const tryCoreTokenSearch = async (token, skipCache = false) => {
+
+            const tryCoreTokenSearch = async (token, numberTokens = [], skipCache = false) => {
                 if (!token) return searchResult;
                 const queries = [];
                 const dateVariants = buildDateVariants(titleDateToken);
+
+                // 生成搜索查询，优先包含数字 token
+                if (numberTokens && numberTokens.length > 0) {
+                    const numberStr = numberTokens.join(',');
+                    dateVariants.forEach(date => queries.push(`${author},${date},${token},${numberStr}`));
+                    queries.push(`${author},${token},${numberStr}`);
+                }
+
+                // 也保留不含数字的查询作为备选
                 dateVariants.forEach(date => queries.push(`${author},${date},${token}`));
                 queries.push(`${author},${token}`);
+
                 const validator = buildResultValidator({ dateToken: titleDateToken, coreToken: token });
                 for (const coreQuery of queries) {
                     console.log(`[LRR Checker] Trying core token search: ${coreQuery}`);
-                    removeExistingMarker();
                     const result = await performAlternativeSearch(coreQuery, titleElement, galleryUrl, { skipCache, validator });
                     if (result.success && result.count === 1) {
                         return result;
@@ -1572,68 +2201,70 @@
             };
 
             if ((!searchResult.success || searchResult.count === 0) && coreToken) {
-                searchResult = await tryCoreTokenSearch(coreToken);
+                const numberTokens = coreTokenInfo && coreTokenInfo.numberTokens ? coreTokenInfo.numberTokens : [];
+                searchResult = await tryCoreTokenSearch(coreToken, numberTokens);
                 if (searchResult.success && searchResult.count === 1) {
-                    return;
+                    await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                 }
             }
-            
+
             // 如果首次搜索失败，尝试简繁体转换和去除英文
             if (!searchResult.success || searchResult.count === 0) {
                 // 检测标题语言，只对中文/日文标题进行简繁转换
                 const titleLanguage = detectTextLanguage(title);
                 const shouldTryConversion = (titleLanguage === 'chinese' || titleLanguage === 'japanese');
-                
+
                 if (!shouldTryConversion) {
                     console.log(`[LRR Checker] Title language is '${titleLanguage}', skipping Traditional/Simplified Chinese conversion`);
                 }
-                
+
                 // 尝试去除英文部分（保留中文、日文、数字、标点）
                 const titleWithoutEnglish = title.replace(/\s+[A-Za-z]+(?:\s+[A-Za-z]+)*$/g, '').trim();
-                
+
                 const traditionalQuery = shouldTryConversion ? `${author},${toTraditional(title)}` : null;
                 const simplifiedQuery = shouldTryConversion ? `${author},${toSimplified(title)}` : null;
                 const traditionalQueryNoEn = (shouldTryConversion && titleWithoutEnglish !== title) ? `${author},${toTraditional(titleWithoutEnglish)}` : null;
                 const simplifiedQueryNoEn = (shouldTryConversion && titleWithoutEnglish !== title) ? `${author},${toSimplified(titleWithoutEnglish)}` : null;
-                
+
                 // 移除可能已存在的未找到标记，以便后续成功搜索能创建新标记
                 // 尝试繁体版本（跳过缓存，强制实际搜索）
                 if (traditionalQuery && traditionalQuery !== searchQuery) {
                     console.log(`[LRR Checker] Trying traditional Chinese: ${traditionalQuery}`);
-                    removeExistingMarker();
                     searchResult = await performAlternativeSearch(traditionalQuery, titleElement, galleryUrl, { skipCache: true });
                     if (searchResult.success && searchResult.count === 1) {
-                        return;
+                        await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                     }
                 }
-                
+
                 // 尝试繁体版本（去除英文）
                 if (traditionalQueryNoEn && traditionalQueryNoEn !== traditionalQuery && !searchResult.success) {
                     console.log(`[LRR Checker] Trying traditional Chinese without English: ${traditionalQueryNoEn}`);
-                    removeExistingMarker();
                     searchResult = await performAlternativeSearch(traditionalQueryNoEn, titleElement, galleryUrl, { skipCache: true });
                     if (searchResult.success && searchResult.count === 1) {
-                        return;
+                        await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                     }
                 }
-                
+
                 // 尝试简体版本（跳过缓存，强制实际搜索）
                 if (simplifiedQuery && simplifiedQuery !== searchQuery && !searchResult.success) {
                     console.log(`[LRR Checker] Trying simplified Chinese: ${simplifiedQuery}`);
-                    removeExistingMarker();
                     searchResult = await performAlternativeSearch(simplifiedQuery, titleElement, galleryUrl, { skipCache: true });
                     if (searchResult.success && searchResult.count === 1) {
-                        return;
+                        await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                     }
                 }
-                
+
                 // 尝试简体版本（去除英文）
                 if (simplifiedQueryNoEn && simplifiedQueryNoEn !== simplifiedQuery && !searchResult.success) {
                     console.log(`[LRR Checker] Trying simplified Chinese without English: ${simplifiedQueryNoEn}`);
-                    removeExistingMarker();
                     searchResult = await performAlternativeSearch(simplifiedQueryNoEn, titleElement, galleryUrl, { skipCache: true });
                     if (searchResult.success && searchResult.count === 1) {
-                        return;
+                        await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                     }
                 }
 
@@ -1643,19 +2274,86 @@
                     if (tradCore && tradCore !== coreToken) {
                         searchResult = await tryCoreTokenSearch(tradCore, true);
                         if (searchResult.success && searchResult.count === 1) {
-                            return;
+                            await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                         }
                     }
                     if ((!searchResult.success || searchResult.count === 0) && simpCore && simpCore !== tradCore) {
                         searchResult = await tryCoreTokenSearch(simpCore, true);
                         if (searchResult.success && searchResult.count === 1) {
-                            return;
+                            await handleResponse(searchResult, titleElement, galleryUrl);
+                return;
                         }
                     }
                 }
             }
 
             // 如果失败或多个结果，尝试深度搜索（获取日文标题）
+            if (!CONFIG.enableDeepSearch) {
+                console.log(`[LRR Checker] Deep search disabled, stopping search for: ${fullTitle}`);
+                // 检查是否有备选结果（页数在误差范围内的）
+                if (fallbackResults.length > 0) {
+                    console.log(`[LRR Checker] Found ${fallbackResults.length} fallback result(s) within pagecount tolerance`);
+                    if (fallbackResults.length === 1) {
+                        // 只有1个备选，显示为不完全匹配
+                        const fallbackFile = fallbackResults[0];
+                        setFinalMarker(titleElement, {
+                            type: MARKER_TYPES.PARTIAL,
+                            icon: '!',
+                            label: 'LRR找到可能匹配（页数不完全符合）',
+                            className: 'lrr-marker-file',
+                            menuBuilder: () => ({
+                                header: '可能匹配',
+                                items: [{
+                                    text: fallbackFile.title,
+                                    url: `${CONFIG.lrrServerUrl}/reader?id=${fallbackFile.arcid}`,
+                                    thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${fallbackFile.arcid}/thumbnail`,
+                                    pagecount: fallbackFile.pagecount
+                                }]
+                            })
+                        });
+                    } else {
+                        // 多个备选，显示?N
+                        setFinalMarker(titleElement, {
+                            type: MARKER_TYPES.MULTIPLE,
+                            icon: `?${fallbackResults.length}`,
+                            label: `LRR发现${fallbackResults.length}个可能匹配`,
+                            className: 'lrr-marker-multiple',
+                            menuBuilder: () => {
+                                const items = [];
+                                fallbackResults.forEach((file, index) => {
+                                    if (index > 0) items.push({ divider: true });
+                                    items.push({
+                                        text: `${index + 1}. ${file.title}`,
+                                        url: `${CONFIG.lrrServerUrl}/reader?id=${file.arcid}`,
+                                        thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${file.arcid}/thumbnail`,
+                                        pagecount: file.pagecount
+                                    });
+                                });
+                                return { header: `找到 ${fallbackResults.length} 个可能的匹配`, items };
+                            }
+                        });
+                    }
+                } else {
+                    // 没有备选结果，显示未找到
+                    console.log(`[LRR Checker] No results found within pagecount tolerance`);
+                    setFinalMarker(titleElement, {
+                        type: MARKER_TYPES.NOT_FOUND,
+                        icon: '🔄',
+                        label: 'LRR未找到',
+                        className: 'lrr-marker-notfound',
+                        onClick: (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            clearGalleryCache(galleryUrl, null);
+                            const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                            refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                        }
+                    });
+                }
+                return;
+            }
+            
             console.log(`[LRR Checker] First search failed or multiple results, trying deep search for better match`);
             // 收集已尝试的查询，避免Deep Search重复
             const attemptedQueries = new Set();
@@ -1667,7 +2365,7 @@
             }
             attemptedQueries.add(`${author},${toTraditional(title)}`);
             attemptedQueries.add(`${author},${toSimplified(title)}`);
-            await performDeepSearch(galleryUrl, titleElement, fullTitle, attemptedQueries);
+            await performDeepSearch(galleryUrl, titleElement, fullTitle, attemptedQueries, cacheKey);
         }
     }
 
@@ -1705,6 +2403,12 @@
     }
 
     function cacheSearchResult(searchQuery, result) {
+        // 不缓存网络异常（临时性问题，用户解决后应该重新获取）
+        if (result.isNetworkError === true) {
+            console.log(`[LRR Checker] Not caching network error for: ${searchQuery}`);
+            return;
+        }
+        
         const cache = getSearchCache();
         cache[searchQuery] = {
             result: result,
@@ -1742,6 +2446,14 @@
             }
         }
 
+        // 清除缩略图缓存（从 URL 中提取所有可能的 archiveId）
+        // 虽然我们无法直接从 galleryUrl 提取 archiveId，但我们可以清除所有缓存
+        // 这在用户点击"刷新"时会清除所有缓存的缩略图
+        for (const key in thumbnailCache) {
+            delete thumbnailCache[key];
+        }
+        console.log(`[LRR Checker] Cleared all thumbnail cache`);
+
         // 清除URL匹配结果缓存
         const urlCacheKey = `lrr-checker-${galleryUrl}`;
         if (localStorage.getItem(urlCacheKey)) {
@@ -1752,20 +2464,9 @@
 
     function refreshGalleryCheck(galleryUrl, titleElement, displayTitle) {
         console.log(`[LRR Checker] Refreshing check for: ${displayTitle} (force refresh, skip cache)`);
-        
-        // 移除现有标记
-        const existingMarker = titleElement.querySelector('.lrr-marker-span');
-        if (existingMarker) {
-            cleanupMarker(existingMarker);
-            existingMarker.remove();
-        }
 
         // 立即显示沙漏，表示正在重新搜索
-        let searchingMarker = document.createElement('span');
-        searchingMarker.classList.add('lrr-marker-span', 'lrr-marker-searching');
-        searchingMarker.dataset.isSearching = 'true';
-        setMarkerIcon(searchingMarker, '⏳', 'LRR重新搜索中...');
-        titleElement.prepend(searchingMarker);
+        setSearchingMarker(titleElement);
 
         // 重新执行检查（强制跳过缓存）
         const cacheKey = `lrr-checker-${galleryUrl}`;
@@ -1815,7 +2516,7 @@
     function exportAllCaches() {
         const titleCache = getTitleCache();
         const searchCache = getSearchCache();
-        
+
         // 收集URL缓存
         const urlCache = {};
         for (let i = 0; i < localStorage.length; i++) {
@@ -1824,7 +2525,7 @@
                 urlCache[key] = JSON.parse(localStorage.getItem(key));
             }
         }
-        
+
         const allCaches = {
             titleCache: titleCache,
             searchCache: searchCache,
@@ -1832,7 +2533,7 @@
             exportDate: new Date().toISOString(),
             version: '1.0'
         };
-        
+
         const blob = new Blob([JSON.stringify(allCaches, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -1842,7 +2543,7 @@
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        
+
         const stats = `所有缓存已导出\n- 标题缓存: ${Object.keys(titleCache).length} 条\n- 搜索缓存: ${Object.keys(searchCache).length} 条\n- URL缓存: ${Object.keys(urlCache).length} 条`;
         alert(stats);
     }
@@ -1882,9 +2583,9 @@
             reader.onload = (event) => {
                 try {
                     const imported = JSON.parse(event.target.result);
-                    
+
                     let stats = [];
-                    
+
                     // 导入标题缓存
                     if (imported.titleCache) {
                         const current = getTitleCache();
@@ -1892,7 +2593,7 @@
                         saveTitleCache(merged);
                         stats.push(`标题缓存: ${Object.keys(merged).length} 条`);
                     }
-                    
+
                     // 导入搜索缓存
                     if (imported.searchCache) {
                         const current = getSearchCache();
@@ -1900,7 +2601,7 @@
                         saveSearchCache(merged);
                         stats.push(`搜索缓存: ${Object.keys(merged).length} 条`);
                     }
-                    
+
                     // 导入URL缓存
                     if (imported.urlCache) {
                         let count = 0;
@@ -1910,7 +2611,7 @@
                         }
                         stats.push(`URL缓存: ${count} 条`);
                     }
-                    
+
                     alert(`所有缓存已导入\n${stats.join('\n')}`);
                 } catch (err) {
                     alert('导入失败：' + err.message);
@@ -1961,7 +2662,7 @@
             exportDate: new Date().toISOString(),
             version: '2.0'
         };
-        
+
         const blob = new Blob([JSON.stringify(keywords, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -1971,7 +2672,7 @@
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        
+
         alert('关键词已导出');
     }
 
@@ -1986,7 +2687,7 @@
             reader.onload = (event) => {
                 try {
                     const imported = JSON.parse(event.target.result);
-                    
+
                     // 更新输入框显示
                     if (imported.authorWhitelist !== undefined) {
                         document.getElementById('authorWhitelist').value = imported.authorWhitelist;
@@ -2001,7 +2702,7 @@
                     } else if (imported.tagKeywords !== undefined) {
                         document.getElementById('coreBlacklist').value = imported.tagKeywords;
                     }
-                    
+
                     alert('关键词已导入到输入框，请点击"保存"按钮保存配置');
                 } catch (err) {
                     alert('导入失败：' + err.message);
@@ -2016,10 +2717,10 @@
         if (confirm('确定要清空所有缓存（包括标题缓存、搜索结果缓存和 URL 匹配结果缓存）吗？')) {
             // 清空标题缓存
             GM_setValue('lrr_title_cache', JSON.stringify({}));
-            
+
             // 清空搜索结果缓存
             GM_setValue('lrr_search_cache', JSON.stringify({}));
-            
+
             // 清空 URL 匹配结果缓存
             const keys = [];
             for (let i = 0; i < localStorage.length; i++) {
@@ -2029,7 +2730,7 @@
                 }
             }
             keys.forEach(key => localStorage.removeItem(key));
-            
+
             alert(`所有缓存已清空\n- 标题缓存已清空\n- 搜索结果缓存已清空\n- ${keys.length} 条 URL 匹配结果缓存已清空`);
         }
     }
@@ -2062,12 +2763,12 @@
             const doc = parser.parseFromString(response.responseText, 'text/html');
             const gnElement = doc.querySelector('#gn');
             const gjElement = doc.querySelector('#gj');
-            
+
             const titles = {
                 gn: gnElement ? gnElement.textContent.trim() : null,
                 gj: gjElement ? gjElement.textContent.trim() : null
             };
-            
+
             if (titles.gn || titles.gj) {
                 console.log(`[LRR Checker] Fetched titles - #gn: ${titles.gn}, #gj: ${titles.gj}`);
                 // 缓存标题
@@ -2076,15 +2777,16 @@
             }
         } catch (error) {
             console.error(`[LRR Checker] Error fetching gallery titles:`, error);
+            // 返回错误标记，区分网络错误和其他错误
+            return { isNetworkError: true, error };
         }
-        return null;
     }
 
     // 提取作者和标题的通用函数
     function extractAuthorAndTitle(fullTitle) {
         let author = null;
         let title = null;
-        
+
         // 获取用户定义的关键词
         const userAuthors = getAuthorKeywordList();
         const userTags = parseKeywordList(CONFIG.coreBlacklist || CONFIG.tagKeywords || '');
@@ -2107,7 +2809,7 @@
             cleaned = cleaned.replace(/\s+/g, ' ').trim();
             return cleaned || null;
         };
-        
+
         // 优先级1：检查用户定义的作者关键词
         for (const knownAuthor of userAuthors) {
             // 大小写不敏感的匹配
@@ -2132,17 +2834,17 @@
                 return { author, title };
             }
         }
-        
+
         // 优先级2：尝试方括号格式
         const authorRegex = /\[((?!汉化|漢化|DL版|中国翻訳)[^\]]+)\]/;
         const authorMatch = fullTitle.match(authorRegex);
         author = authorMatch ? authorMatch[1] : null;
-        
+
         // 检查是否为用户定义的标签关键词
         if (author && userTags.includes(author)) {
             author = null; // 重置，尝试短横线格式
         }
-        
+
         // 如果有方括号作者，提取方括号后的标题
         if (author) {
             const afterBracket = fullTitle.slice(fullTitle.indexOf(']') + 1);
@@ -2156,7 +2858,7 @@
                 title = cleanTitleText(dashMatch[2]) || dashMatch[2].trim();
             }
         }
-        
+
         // 优先级4：回退到首词作者推断（旧逻辑）
         if (!author) {
             const leadingMatch = fullTitle.match(/^([^\s\[\]\(\)\-]+)\s+(.+)/);
@@ -2170,11 +2872,11 @@
                 }
             }
         }
-        
+
         return { author, title };
     }
 
-    async function performDeepSearch(galleryUrl, titleElement, displayTitle, attemptedQueries = new Set()) {
+    async function performDeepSearch(galleryUrl, titleElement, displayTitle, attemptedQueries = new Set(), cacheKey = null) {
         if (!CONFIG.enableDeepSearch) {
             console.log(`[LRR Checker] Deep search disabled, skipping: ${displayTitle}`);
             return;
@@ -2200,20 +2902,30 @@
             console.log(`[LRR Checker] Failed to fetch titles from detail page`);
             return;
         }
-        
+
         // 尝试从 #gn (英文/中文标题) 提取
         let searchResults = [];
+        let fallbackResults = [];  // 收集备选结果（关键字匹配但页数不符）
         const summarizeAttempts = () => {
             return searchResults.map(r => `${r.type}:${r.query}${r.success ? '[✓]' : ''}`).join(' | ');
         };
 
-        if (titles.gn) {
+        // 根据配置决定搜索顺序
+        console.log(`[LRR Checker] 标题搜索优先级: ${CONFIG.titleSearchOrder === 'gj' ? '日文(#gj) > 英文(#gn)' : '英文(#gn) > 日文(#gj)'}`);
+        const shouldSearchGnFirst = CONFIG.titleSearchOrder !== 'gj';
+
+        // 第 3 层（深度搜索）：统一模板，根据配置决定处理顺序
+        // 注意：完整标题搜索已在第 2 层完成，这里不再重复
+
+        // 第一优先级：根据配置选择的标题类型
+        if (shouldSearchGnFirst && titles.gn) {
             const { author: gnAuthor, title: gnTitle } = extractAuthorAndTitle(titles.gn);
             const gnCoreInfo = extractCoreToken(gnTitle || titles.gn);
             const gnCoreToken = gnCoreInfo ? gnCoreInfo.token : null;
+            const gnNumberTokens = gnCoreInfo && gnCoreInfo.numberTokens ? gnCoreInfo.numberTokens : [];
             const gnDateToken = extractDateToken(titles.gn);
             console.log(`[LRR Checker] Deep search extracted from #gn - Author: "${gnAuthor}", Title: "${gnTitle}"`);
-            
+
             if (gnAuthor && gnTitle && gnAuthor !== gnTitle) {
                 const query = `${gnAuthor},${gnTitle}`;
                 if (attemptedQueries.has(query)) {
@@ -2223,12 +2935,20 @@
                     const result = await performAlternativeSearch(query, titleElement, galleryUrl);
                     attemptedQueries.add(query);
                     if (result.success) {
-                        return; // 成功找到，直接返回
+                        // 成功找到，调用handleResponse设置最终标记
+                        const handleResult = { success: 1, data: { id: result.files[0].arcid }, method: 'deep-search', isExactMatch: false };
+                        await handleResponse(handleResult, titleElement, galleryUrl);
+                        return;
+                    }
+                    // 如果搜索返回了结果（多个或单个），但页数不符合或多个可能匹配，收集为备选
+                    if (result.count > 0 && result.files && result.files.length > 0) {
+                        console.log(`[LRR Checker] 搜索返回 ${result.files.length} 个结果，收集为备选结果`);
+                        fallbackResults = fallbackResults.concat(result.files);
                     }
                     searchResults.push({ type: 'gn', query, success: !!result.success });
                 }
             }
-            
+
             // 尝试提取标题的第一部分（去掉副标题）
             if (gnAuthor && gnTitle && gnTitle.includes('-')) {
                 const titleFirstPart = gnTitle.split('-')[0].trim();
@@ -2236,7 +2956,7 @@
                     const simpleQuery = `${gnAuthor},${titleFirstPart}`;
                     if (!attemptedQueries.has(simpleQuery)) {
                         console.log(`[LRR Checker] Trying simplified #gn search: ${simpleQuery}`);
-                        removeAllMarkers(titleElement, true);
+                        clearAllMarkers(titleElement);
                         const simpleResult = await performAlternativeSearch(simpleQuery, titleElement, galleryUrl);
                         attemptedQueries.add(simpleQuery);
                         if (simpleResult.success) {
@@ -2250,15 +2970,25 @@
             if (gnAuthor && gnCoreToken) {
                 const gnQueries = [];
                 const gnDateVariants = buildDateVariants(gnDateToken);
+
+                // 优先包含数字 token
+                if (gnNumberTokens && gnNumberTokens.length > 0) {
+                    const numberStr = gnNumberTokens.join(',');
+                    gnDateVariants.forEach(date => gnQueries.push(`${gnAuthor},${date},${gnCoreToken},${numberStr}`));
+                    gnQueries.push(`${gnAuthor},${gnCoreToken},${numberStr}`);
+                }
+
+                // 也保留不含数字的查询作为备选
                 gnDateVariants.forEach(date => gnQueries.push(`${gnAuthor},${date},${gnCoreToken}`));
                 gnQueries.push(`${gnAuthor},${gnCoreToken}`);
+
                 for (const coreQuery of gnQueries) {
                     if (attemptedQueries.has(coreQuery)) {
                         console.log(`[LRR Checker] Skipping duplicate #gn core search: ${coreQuery}`);
                         continue;
                     }
                     console.log(`[LRR Checker] Trying #gn core search: ${coreQuery}`);
-                    removeAllMarkers(titleElement, true);
+                    clearAllMarkers(titleElement);
                     const coreResult = await performAlternativeSearch(coreQuery, titleElement, galleryUrl, { skipCache: true, validator: buildResultValidator({ dateToken: gnDateToken, coreToken: gnCoreToken }) });
                     attemptedQueries.add(coreQuery);
                     if (coreResult.success) {
@@ -2268,50 +2998,47 @@
                 }
             }
 
-            // 如果拆分搜索失败，尝试使用完整 #gn 标题
-            const normalizedFullGn = titles.gn.replace(/\s+/g, ' ').trim();
-            if (normalizedFullGn) {
-                console.log(`[LRR Checker] Trying full #gn string search: ${normalizedFullGn}`);
-                removeAllMarkers(titleElement, true);
-                const fullGnResult = await performAlternativeSearch(normalizedFullGn, titleElement, galleryUrl, { skipCache: true });
-                if (fullGnResult.success) {
-                    return;
-                }
-                searchResults.push({ type: 'gn-full', query: normalizedFullGn, success: !!fullGnResult.success });
-            }
+            // 注：完整 #gn 标题搜索已在第 2 层执行，此处不再重复
         }
 
-        // 如果 #gn 搜索失败，尝试 #gj (日文标题)
+        // 第二优先级：搜索另一种标题类型
         if (titles.gj && titles.gj !== titles.gn) {
             let { author, title: gjTitle } = extractAuthorAndTitle(titles.gj);
             const gjCoreInfo = extractCoreToken(gjTitle || titles.gj);
             const gjCoreToken = gjCoreInfo ? gjCoreInfo.token : null;
             const gjDateToken = extractDateToken(titles.gj) || extractDateToken(titles.gn);
-            
+
             // 如果 #gj 没有作者，使用 #gn 的作者
             if (!author && titles.gn) {
                 const gnExtract = extractAuthorAndTitle(titles.gn);
                 author = gnExtract.author;
             }
-            
+
             if (author && gjTitle && author !== gjTitle) {
                 const query = `${author},${gjTitle}`;
                 console.log(`[LRR Checker] Trying #gj search: ${query}`);
-                removeAllMarkers(titleElement, true);
                 const result = await performAlternativeSearch(query, titleElement, galleryUrl);
                 if (result.success) {
-                    return; // 成功找到，直接返回
+                    // 成功找到，调用handleResponse设置最终标记
+                    const handleResult = { success: 1, data: { id: result.files[0].arcid }, method: 'deep-search', isExactMatch: false };
+                    await handleResponse(handleResult, titleElement, galleryUrl);
+                    return;
+                }
+                // 如果搜索返回了结果（多个或单个），但页数不符合或多个可能匹配，收集为备选
+                if (result.count > 0 && result.files && result.files.length > 0) {
+                    console.log(`[LRR Checker] 搜索返回 ${result.files.length} 个结果，收集为备选结果`);
+                    fallbackResults = fallbackResults.concat(result.files);
                 }
                 searchResults.push({ type: 'gj', query, success: !!result.success });
             }
-            
+
             // 尝试提取标题的第一部分（去掉副标题）
             if (author && gjTitle && gjTitle.includes('-')) {
                 const titleFirstPart = gjTitle.split('-')[0].trim();
                 if (titleFirstPart && titleFirstPart !== gjTitle) {
                     const simpleQuery = `${author},${titleFirstPart}`;
                     console.log(`[LRR Checker] Trying simplified #gj search: ${simpleQuery}`);
-                    removeAllMarkers(titleElement, true);
+                    clearAllMarkers(titleElement);
                     const simpleResult = await performAlternativeSearch(simpleQuery, titleElement, galleryUrl);
                     if (simpleResult.success) {
                         return;
@@ -2327,48 +3054,44 @@
                 gjQueries.push(`${author},${gjCoreToken}`);
                 for (const coreQuery of gjQueries) {
                     console.log(`[LRR Checker] Trying #gj core search: ${coreQuery}`);
-                    removeAllMarkers(titleElement, true);
+                    clearAllMarkers(titleElement);
                     const coreResult = await performAlternativeSearch(coreQuery, titleElement, galleryUrl, { skipCache: true, validator: buildResultValidator({ dateToken: gjDateToken, coreToken: gjCoreToken }) });
                     if (coreResult.success) {
                         return;
+                    }
+                    // 如果搜索返回了结果（多个或单个），但页数不符合或多个可能匹配，收集为备选
+                    if (coreResult.count > 0 && coreResult.files && coreResult.files.length > 0) {
+                        console.log(`[LRR Checker] 搜索返回 ${coreResult.files.length} 个结果，收集为备选结果`);
+                        fallbackResults = fallbackResults.concat(coreResult.files);
                     }
                     searchResults.push({ type: 'gj-core', query: coreQuery, success: !!coreResult.success });
                 }
             }
 
-            const normalizedFullGj = titles.gj.replace(/\s+/g, ' ').trim();
-            if (normalizedFullGj) {
-                console.log(`[LRR Checker] Trying full #gj string search: ${normalizedFullGj}`);
-                removeAllMarkers(titleElement, true);
-                const fullGjResult = await performAlternativeSearch(normalizedFullGj, titleElement, galleryUrl, { skipCache: true });
-                if (fullGjResult.success) {
-                    return;
-                }
-                searchResults.push({ type: 'gj-full', query: normalizedFullGj, success: !!fullGjResult.success });
-            }
+            // 注：完整 #gj 标题搜索已在第 2 层执行，此处不再重复
         }
 
         if (searchResults.length > 0) {
             console.log(`[LRR Checker] Deep search with #gn/#gj failed. Tried: ${summarizeAttempts()}`);
         }
-        
+
         // 最后尝试：提取日期进行搜索（避免字符转换问题）
         if (titles.gn) {
             const dateRegex = /(\d{4}[\.\-/]\d{1,2}[\.\-/]\d{1,2})/;
             const dateMatch = titles.gn.match(dateRegex);
-            
+
             if (dateMatch) {
                 const { author } = extractAuthorAndTitle(titles.gn);
                 const dateCoreInfo = extractCoreToken(titles.gn);
                 const dateCoreToken = dateCoreInfo ? dateCoreInfo.token : null;
-                
+
                 if (author) {
                     const dates = buildDateVariants(dateMatch[1]);
                     for (const date of dates) {
                         if (dateCoreToken) {
                             const queryWithDateAndCore = `${author},${date},${dateCoreToken}`;
                             console.log(`[LRR Checker] Final attempt with date + core: ${queryWithDateAndCore}`);
-                            removeAllMarkers(titleElement, true);
+                            clearAllMarkers(titleElement);
                             const resultWithCore = await performAlternativeSearch(queryWithDateAndCore, titleElement, galleryUrl, {
                                 skipCache: true,
                                 precision: 'date-core',
@@ -2379,10 +3102,9 @@
                             }
                             searchResults.push({ type: 'date-core', query: queryWithDateAndCore, success: !!resultWithCore.success });
                         }
-                        
+
                         const queryWithDate = `${author},${date}`;
                         console.log(`[LRR Checker] Final attempt with date: ${queryWithDate}`);
-                        removeAllMarkers(titleElement, true);
                         const result = await performAlternativeSearch(queryWithDate, titleElement, galleryUrl, {
                             skipCache: true,
                             disableStore: true,
@@ -2390,6 +3112,9 @@
                             validator: buildResultValidator({ dateToken: date, coreToken: null })
                         });
                         if (result.success) {
+                            // 成功找到，调用handleResponse设置最终标记
+                            const handleResult = { success: 1, data: { id: result.files[0].arcid }, method: 'deep-search', isExactMatch: false };
+                            await handleResponse(handleResult, titleElement, galleryUrl);
                             return;
                         }
                         searchResults.push({ type: 'date', query: queryWithDate, success: !!result.success });
@@ -2399,29 +3124,100 @@
         }
 
         console.log(`[LRR Checker] All deep search attempts failed`);
-        
-        // 删除搜索标记
-        const searchingMarker = titleElement.querySelector('.lrr-marker-span[data-is-searching="true"]');
-        if (searchingMarker) {
-            cleanupMarker(searchingMarker);
-            searchingMarker.remove();
-        }
-        
+
         // 如果有保存的多结果标记，恢复它
-        if (savedMarkerData && !titleElement.querySelector('.lrr-marker-span')) {
+        // 深度搜索完成，设置最终标记
+        if (savedMarkerData) {
+            // 有保存的多匹配标记，恢复为最终标记
             console.log(`[LRR Checker] Restoring saved multiple marker: ${savedMarkerData.icon}`);
-            let restoredMarker = document.createElement('span');
-            restoredMarker.classList.add('lrr-marker-span', 'lrr-marker-multiple');
-            setMarkerIcon(restoredMarker, savedMarkerData.icon, savedMarkerData.ariaLabel);
-            registerMarker(restoredMarker, savedMarkerData.options);
-            titleElement.prepend(restoredMarker);
-        } else if (!titleElement.querySelector('.lrr-marker-span')) {
-            // 如果所有搜索都失败了且没有保存的标记，显示未找到标记
-            let notFoundSpan = document.createElement('span');
-            notFoundSpan.classList.add('lrr-marker-span', 'lrr-marker-notfound');
-            setMarkerIcon(notFoundSpan, '🔄', 'LRR未找到匹配，点击刷新');
-            notFoundSpan.title = 'LRR未找到匹配，点击刷新缓存重新检查';
-            registerMarker(notFoundSpan, {
+            setFinalMarker(titleElement, {
+                type: MARKER_TYPES.MULTIPLE,
+                icon: savedMarkerData.icon,
+                label: savedMarkerData.ariaLabel,
+                className: 'lrr-marker-multiple',
+                menuBuilder: savedMarkerData.options.menuBuilder
+            });
+        } else if (fallbackResults.length > 0) {
+            // 虽然没有精确匹配，但收集到了备选结果
+            console.log(`[LRR Checker] Deep search found ${fallbackResults.length} fallback result(s)`);
+            if (fallbackResults.length === 1) {
+                // 单个备选，显示!
+                const fallbackFile = fallbackResults[0];
+                setFinalMarker(titleElement, {
+                    type: MARKER_TYPES.PARTIAL,
+                    icon: '!',
+                    label: 'LRR找到可能匹配（页数不完全符合）',
+                    className: 'lrr-marker-file',
+                    menuBuilder: () => ({
+                        header: '可能匹配',
+                        items: [{
+                            text: fallbackFile.title,
+                            url: `${CONFIG.lrrServerUrl}/reader?id=${fallbackFile.arcid}`,
+                            thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${fallbackFile.arcid}/thumbnail`,
+                            pagecount: fallbackFile.pagecount
+                        }]
+                    })
+                });
+                // 缓存单个备选结果
+                if (cacheKey) {
+                    const cacheData = { 
+                        success: 0,  // 0表示备选结果
+                        count: 1,
+                        files: fallbackResults,
+                        method: 'deep-search-partial'
+                    };
+                    setCache(cacheKey, cacheData);
+                    console.log(`[LRR Checker] Cached partial fallback result`);
+                }
+            } else {
+                // 多个备选，显示?N
+                setFinalMarker(titleElement, {
+                    type: MARKER_TYPES.MULTIPLE,
+                    icon: `?${fallbackResults.length}`,
+                    label: `LRR发现${fallbackResults.length}个可能匹配`,
+                    className: 'lrr-marker-multiple',
+                    menuBuilder: () => {
+                        const items = [];
+                        fallbackResults.forEach((file, index) => {
+                            if (index > 0) items.push({ divider: true });
+                            items.push({
+                                text: `${index + 1}. ${file.title}`,
+                                url: `${CONFIG.lrrServerUrl}/reader?id=${file.arcid}`,
+                                thumbnailUrl: `${CONFIG.lrrServerUrl}/api/archives/${file.arcid}/thumbnail`,
+                                pagecount: file.pagecount
+                            });
+                        });
+                        return { 
+                            header: `找到 ${fallbackResults.length} 个可能的匹配`, 
+                            items,
+                            refreshCallback: () => {
+                                clearGalleryCache(galleryUrl, null);
+                                const displayTitle = titleElement.textContent.replace(/\(LRR.*?\)/g, '').trim();
+                                refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
+                            }
+                        };
+                    }
+                });
+                // 缓存多个备选结果
+                if (cacheKey) {
+                    const cacheData = { 
+                        success: 0,  // 0表示多个备选结果
+                        count: fallbackResults.length,
+                        files: fallbackResults,
+                        method: 'deep-search-multiple'
+                    };
+                    setCache(cacheKey, cacheData);
+                    console.log(`[LRR Checker] Cached ${fallbackResults.length} fallback results`);
+                }
+            }
+        } else {
+            // 所有搜索都失败且没有备选，显示未找到标记
+            console.log(`[LRR Checker] Deep search completed, no results found`);
+            setFinalMarker(titleElement, {
+                type: MARKER_TYPES.NOT_FOUND,
+                icon: '🔄',
+                label: 'LRR未找到匹配，点击刷新',
+                className: 'lrr-marker-notfound',
                 onClick: (e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -2430,7 +3226,6 @@
                     refreshGalleryCheck(galleryUrl, titleElement, displayTitle);
                 }
             });
-            titleElement.prepend(notFoundSpan);
         }
     }
 
@@ -2568,7 +3363,7 @@
             min-width: 120px;
             box-sizing: border-box;
         }
-        
+
         .lrr-cache-button-row {
             display: flex;
             gap: 10px;
@@ -2646,7 +3441,7 @@
 
         const body = document.createElement('div');
         body.className = 'lrr-settings-body';
-        
+
         const form = document.createElement('div');
         form.className = 'lrr-settings-form';
         form.innerHTML = `
@@ -2664,7 +3459,7 @@
                     <span>核心黑名单（逗号分隔，剔除固定后缀/噪声）</span>
                     <textarea id="coreBlacklist" rows="2">${CONFIG.coreBlacklist || CONFIG.tagKeywords || ''}</textarea>
                 </label>
-                
+
                 <h3 class="lrr-settings-section-title" style="margin-top: 15px;">服务器设置</h3>
                 <label>
                     <span>Lanraragi 服务器地址</span>
@@ -2675,7 +3470,7 @@
                     <input type="text" id="lrrApiKey" value="${CONFIG.lrrApiKey}" placeholder="留空表示无需密钥" />
                 </label>
             </div>
-            
+
             <div class="lrr-settings-right">
                 <h3 class="lrr-settings-section-title">数值配置</h3>
                 <label>
@@ -2694,7 +3489,7 @@
                     <span>深度搜索间隔（毫秒）</span>
                     <input type="number" id="deepSearchDelay" value="${CONFIG.deepSearchDelay}" min="0" max="5000" step="100" />
                 </label>
-                
+
                 <h3 class="lrr-settings-section-title" style="margin-top: 20px;">功能开关</h3>
                 <label class="lrr-settings-checkbox-label">
                     <input type="checkbox" id="enableDeepSearch" ${CONFIG.enableDeepSearch ? 'checked' : ''} />
@@ -2704,6 +3499,21 @@
                     <input type="checkbox" id="cacheNotFoundResults" ${CONFIG.cacheNotFoundResults ? 'checked' : ''} />
                     <span>缓存未匹配结果</span>
                 </label>
+                <label class="lrr-settings-checkbox-label">
+                    <input type="checkbox" id="enablePagecountMatching" ${CONFIG.enablePagecountMatching ? 'checked' : ''} />
+                    <span>启用页数匹配（精确搜索）</span>
+                </label>
+                <label>
+                    <span>页数误差范围（正负多少页）</span>
+                    <input type="number" id="pagecountTolerance" value="${CONFIG.pagecountTolerance}" min="0" max="20" />
+                </label>
+                <label>
+                    <span>标题搜索优先级</span>
+                    <select id="titleSearchOrder" style="padding: 4px; border-radius: 4px;">
+                        <option value="gj" ${CONFIG.titleSearchOrder === 'gj' ? 'selected' : ''}>优先搜索日文标题 (#gj)</option>
+                        <option value="gn" ${CONFIG.titleSearchOrder === 'gn' ? 'selected' : ''}>优先搜索英文标题 (#gn)</option>
+                    </select>
+                </label>
             </div>
         `;
         body.appendChild(form);
@@ -2711,7 +3521,7 @@
         // 缓存管理区域
         const cacheSection = document.createElement('div');
         cacheSection.className = 'lrr-settings-section';
-        
+
         // 统计缓存数量
         const titleCacheCount = Object.keys(getTitleCache()).length;
         let urlCacheCount = 0;
@@ -2721,79 +3531,79 @@
                 urlCacheCount++;
             }
         }
-        
+
         const searchCacheCount = Object.keys(getSearchCache()).length;
-        
+
         cacheSection.innerHTML = `
             <h3>缓存管理</h3>
             <div class="lrr-settings-cache-info">
                 标题缓存: ${titleCacheCount} 条 | 搜索结果缓存: ${searchCacheCount} 条 | URL 匹配结果缓存: ${urlCacheCount} 条
             </div>
         `;
-        
+
         const cacheButtons = document.createElement('div');
-        
+
         // 第一行：导入导出按钮
         const row1 = document.createElement('div');
         row1.className = 'lrr-cache-button-row';
-        
+
         const exportCacheBtn = document.createElement('button');
         exportCacheBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         exportCacheBtn.textContent = '导出标题缓存';
         exportCacheBtn.onclick = exportTitleCache;
-        
+
         const importCacheBtn = document.createElement('button');
         importCacheBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         importCacheBtn.textContent = '导入标题缓存';
         importCacheBtn.onclick = importTitleCache;
-        
+
         const exportAllCachesBtn = document.createElement('button');
         exportAllCachesBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         exportAllCachesBtn.textContent = '导出所有缓存';
         exportAllCachesBtn.onclick = exportAllCaches;
         exportAllCachesBtn.style.fontWeight = 'bold';
-        
+
         const importAllCachesBtn = document.createElement('button');
         importAllCachesBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         importAllCachesBtn.textContent = '导入所有缓存';
         importAllCachesBtn.onclick = importAllCaches;
         importAllCachesBtn.style.fontWeight = 'bold';
-        
+
         row1.appendChild(exportCacheBtn);
         row1.appendChild(importCacheBtn);
         row1.appendChild(exportAllCachesBtn);
         row1.appendChild(importAllCachesBtn);
-        
+
         // 第二行：清空按钮
         const row2 = document.createElement('div');
         row2.className = 'lrr-cache-button-row';
-        
+
         const clearTitleCacheBtn = document.createElement('button');
         clearTitleCacheBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         clearTitleCacheBtn.textContent = '清空标题缓存';
         clearTitleCacheBtn.onclick = clearTitleCache;
-        
+
         const clearSearchCacheBtn = document.createElement('button');
         clearSearchCacheBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         clearSearchCacheBtn.textContent = '清空搜索缓存';
         clearSearchCacheBtn.onclick = clearSearchCache;
-        
+
         const clearUrlCacheBtn = document.createElement('button');
         clearUrlCacheBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         clearUrlCacheBtn.textContent = '清空URL缓存';
         clearUrlCacheBtn.onclick = clearUrlCache;
-        
+
         const clearAllCachesBtn = document.createElement('button');
         clearAllCachesBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         clearAllCachesBtn.textContent = '清空所有缓存';
         clearAllCachesBtn.onclick = clearAllCaches;
         clearAllCachesBtn.style.fontWeight = 'bold';
-        
+
         row2.appendChild(clearTitleCacheBtn);
         row2.appendChild(clearSearchCacheBtn);
         row2.appendChild(clearUrlCacheBtn);
         row2.appendChild(clearAllCachesBtn);
-        
+
         cacheButtons.appendChild(row1);
         cacheButtons.appendChild(row2);
         cacheSection.appendChild(cacheButtons);
@@ -2806,34 +3616,34 @@
         footer.style.display = 'flex';
         footer.style.justifyContent = 'space-between';
         footer.style.alignItems = 'center';
-        
+
         // 左侧：关键词按钮
         const leftButtons = document.createElement('div');
         leftButtons.style.display = 'flex';
         leftButtons.style.gap = '8px';
-        
+
         const exportKeywordsBtn = document.createElement('button');
         exportKeywordsBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         exportKeywordsBtn.textContent = '导出关键词';
         exportKeywordsBtn.style.fontSize = '13px';
         exportKeywordsBtn.style.padding = '6px 12px';
         exportKeywordsBtn.onclick = exportKeywords;
-        
+
         const importKeywordsBtn = document.createElement('button');
         importKeywordsBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         importKeywordsBtn.textContent = '导入关键词';
         importKeywordsBtn.style.fontSize = '13px';
         importKeywordsBtn.style.padding = '6px 12px';
         importKeywordsBtn.onclick = importKeywords;
-        
+
         leftButtons.appendChild(exportKeywordsBtn);
         leftButtons.appendChild(importKeywordsBtn);
-        
+
         // 右侧：保存和取消按钮
         const rightButtons = document.createElement('div');
         rightButtons.style.display = 'flex';
         rightButtons.style.gap = '10px';
-        
+
         const saveBtn = document.createElement('button');
         saveBtn.className = 'lrr-settings-btn lrr-settings-btn-primary';
         saveBtn.textContent = '保存';
@@ -2849,12 +3659,12 @@
             CONFIG.maxConcurrentRequests = parseInt(document.getElementById('maxConcurrentRequests').value);
             CONFIG.cacheExpiryDays = parseInt(document.getElementById('cacheExpiryDays').value);
             CONFIG.enableDeepSearch = document.getElementById('enableDeepSearch').checked;
-            
+
             // 处理缓存未匹配结果选项
             const newCacheNotFoundResults = document.getElementById('cacheNotFoundResults').checked;
             const oldCacheNotFoundResults = CONFIG.cacheNotFoundResults;
             CONFIG.cacheNotFoundResults = newCacheNotFoundResults;
-            
+
             // 如果从启用改为禁用，清除所有未匹配的缓存
             if (oldCacheNotFoundResults && !newCacheNotFoundResults) {
                 console.log('[LRR Checker] Clearing all not-found cached results...');
@@ -2875,23 +3685,26 @@
                 }
                 console.log(`[LRR Checker] Cleared ${clearedCount} not-found cached results`);
             }
-            
+
             CONFIG.deepSearchConcurrency = parseInt(document.getElementById('deepSearchConcurrency').value);
             CONFIG.deepSearchDelay = parseInt(document.getElementById('deepSearchDelay').value);
-            
+            CONFIG.enablePagecountMatching = document.getElementById('enablePagecountMatching').checked;
+            CONFIG.pagecountTolerance = parseInt(document.getElementById('pagecountTolerance').value);
+            CONFIG.titleSearchOrder = document.getElementById('titleSearchOrder').value;
+
             saveConfig(CONFIG);
             alert('设置已保存！页面将刷新以应用新配置。');
             location.reload();
         };
-        
+
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'lrr-settings-btn lrr-settings-btn-ghost';
         cancelBtn.textContent = '取消';
         cancelBtn.onclick = closeSettingsPanel;
-        
+
         rightButtons.appendChild(saveBtn);
         rightButtons.appendChild(cancelBtn);
-        
+
         footer.appendChild(leftButtons);
         footer.appendChild(rightButtons);
         panel.appendChild(footer);
@@ -2920,7 +3733,7 @@
         btn.textContent = 'LRR 设置';
         btn.onclick = openSettingsPanel;
         wrapper.appendChild(btn);
-        
+
         const anchor = target.querySelector('p') || target;
         anchor.appendChild(wrapper);
     }
@@ -3073,16 +3886,16 @@
         "龎厐龐庞龑䶮龓𫜲龔龚龕龛龜龟龭𩨎龯𨱆鿁䜤鿓鿒";
 
 
-        
+
         // 初始化映射表
         for (let i = 0; i < S2T_STR.length; i += 2) {
             S2T_MAP[S2T_STR[i]] = S2T_STR[i + 1];
         }
-        
+
         for (let i = 0; i < T2S_STR.length; i += 2) {
             T2S_MAP[T2S_STR[i]] = T2S_STR[i + 1];
         }
-        
+
         console.log('[LRR Checker] OpenCC maps initialized:', Object.keys(S2T_MAP).length, 'simplified characters');
     })();
 
