@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.3.1
+// @version      2.3.5
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
@@ -357,6 +357,50 @@
         return null;
     };
 
+    // ==================== 通用并发控制函数 ====================
+    // 获取随机延迟（基于 refreshIntervalMin 和 refreshIntervalMax）
+    const getRandomInterval = () => {
+        const min = parseInt(localStorage.getItem('REFRESH_INTERVAL_MIN_PREF_KEY') || '1200');
+        const max = parseInt(localStorage.getItem('REFRESH_INTERVAL_MAX_PREF_KEY') || '2000');
+        return Math.floor(Math.random() * (max - min + 1)) + min;
+    };
+
+    const executeWithConcurrencyLimit = async (tasks, concurrency = null, onProgress = null) => {
+        if (!tasks?.length) return [];
+        const maxConcurrent = Math.max(1, concurrency || refreshConcurrent || 1);
+        const results = new Array(tasks.length);
+        let completed = 0;
+        let taskIndex = 0;
+        
+        const executeNext = async () => {
+            // 从任务队列中取出下一个任务索引
+            const idx = taskIndex++;
+            if (idx >= tasks.length) return;
+            
+            try {
+                results[idx] = await tasks[idx]();
+            } catch (err) {
+                results[idx] = { error: err };
+            } finally {
+                completed++;
+                onProgress?.(completed, tasks.length);
+            }
+            
+            // 循环执行下一个任务（这样可以确保序列化）
+            return executeNext();
+        };
+        
+        // 并发启动 maxConcurrent 个 worker
+        const workers = [];
+        for (let i = 0; i < Math.min(maxConcurrent, tasks.length); i++) {
+            workers.push(executeNext());
+        }
+        
+        // 等待所有 worker 完成
+        await Promise.all(workers);
+        return results;
+    };
+    
     // 种子请求队列控制
     const magnetRequestQueue = {
         queue: [],
@@ -4954,6 +4998,7 @@
             autoRefreshRow.style.fontWeight = '600';
             autoRefreshRow.style.cursor = 'pointer';
             autoRefreshRow.style.textAlign = 'left';
+            autoRefreshRow.title = '页面加载时自动扫描并获取搜索结果中的种子磁链信息';
             autoRefreshRow.addEventListener('mouseenter', () => {
                 autoRefreshRow.style.background = hoverBg;
             });
@@ -4965,7 +5010,8 @@
             autoRefreshCheckbox.checked = autoRefreshEnabled;
             autoRefreshCheckbox.style.marginRight = '8px';
             const autoRefreshLabel = document.createElement('span');
-            autoRefreshLabel.textContent = '自动刷新下载信息';
+            autoRefreshLabel.textContent = '自动扫描种子';
+            autoRefreshLabel.title = '页面加载时自动扫描并获取搜索结果中的种子磁链信息';
             autoRefreshRow.appendChild(autoRefreshCheckbox);
             autoRefreshRow.appendChild(autoRefreshLabel);
             const applyAutoRefreshSetting = () => {
@@ -5014,6 +5060,7 @@
             hoverRefreshRow.style.fontWeight = '600';
             hoverRefreshRow.style.cursor = 'pointer';
             hoverRefreshRow.style.textAlign = 'left';
+            hoverRefreshRow.title = '当鼠标悬停在搜索结果上时，自动刷新该画廊的种子磁链信息';
             hoverRefreshRow.addEventListener('mouseenter', () => {
                 hoverRefreshRow.style.background = hoverBg;
             });
@@ -5025,7 +5072,8 @@
             hoverRefreshCheckbox.checked = hoverRefreshEnabled;
             hoverRefreshCheckbox.style.marginRight = '8px';
             const hoverRefreshLabel = document.createElement('span');
-            hoverRefreshLabel.textContent = '鼠标悬停刷新下载信息';
+            hoverRefreshLabel.textContent = '鼠标悬停刷新种子信息';
+            hoverRefreshLabel.title = '当鼠标悬停在搜索结果上时，自动刷新该画廊的种子磁链信息';
             hoverRefreshRow.appendChild(hoverRefreshCheckbox);
             hoverRefreshRow.appendChild(hoverRefreshLabel);
             const applyHoverRefreshSetting = () => {
@@ -5055,13 +5103,15 @@
             downloadCacheRow.style.fontWeight = '600';
             downloadCacheRow.style.cursor = 'pointer';
             downloadCacheRow.style.textAlign = 'left';
+            downloadCacheRow.title = '启用后，将缓存获取到的种子磁链信息，避免重复请求。达到超时时间后自动清除缓存';
             const downloadCacheCheckbox = document.createElement('input');
             downloadCacheCheckbox.type = 'checkbox';
             downloadCacheCheckbox.dataset.setting = 'download-cache';
             downloadCacheCheckbox.checked = downloadCacheEnabled;
             downloadCacheCheckbox.style.marginRight = '8px';
             const downloadCacheLabel = document.createElement('span');
-            downloadCacheLabel.textContent = '缓存下载信息';
+            downloadCacheLabel.textContent = '缓存种子信息';
+            downloadCacheLabel.title = '启用后，将缓存获取到的种子磁链信息，避免重复请求。达到超时时间后自动清除缓存';
             downloadCacheRow.appendChild(downloadCacheCheckbox);
             downloadCacheRow.appendChild(downloadCacheLabel);
             const applyDownloadCacheSetting = () => {
@@ -5098,8 +5148,10 @@
             downloadCacheTimeoutRow.style.gap = '8px';
             downloadCacheTimeoutRow.style.fontSize = '12px';
             downloadCacheTimeoutRow.style.textAlign = 'left';
+            downloadCacheTimeoutRow.title = '种子信息缓存的有效期。超过这个时间后，缓存的信息会被清除，下次访问时会重新获取';
             const downloadCacheTimeoutLabel = document.createElement('span');
-            downloadCacheTimeoutLabel.textContent = '超时(分钟):';
+            downloadCacheTimeoutLabel.textContent = '缓存超时(分钟):';
+            downloadCacheTimeoutLabel.title = '种子信息缓存的有效期。超过这个时间后，缓存的信息会被清除，下次访问时会重新获取';
             const downloadCacheTimeoutInput = document.createElement('input');
             downloadCacheTimeoutInput.type = 'number';
             downloadCacheTimeoutInput.min = '1';
@@ -5133,9 +5185,11 @@
             concurrentRow.style.fontSize = '13px';
             concurrentRow.style.fontWeight = '600';
             concurrentRow.style.textAlign = 'left';
+            concurrentRow.title = '控制批量操作中同时进行的请求数。值越大越快，但容易导致服务器限流。建议设置为 3-5。';
             const concurrentLabel = document.createElement('span');
-            concurrentLabel.textContent = '刷新并发数:';
+            concurrentLabel.textContent = '最大并发数:';
             concurrentLabel.style.flex = '1';
+            concurrentLabel.title = '控制批量操作中同时进行的请求数。值越大越快，但容易导致服务器限流。建议设置为 3-5。';
             const concurrentInput = document.createElement('input');
             concurrentInput.type = 'number';
             concurrentInput.value = refreshConcurrent;
@@ -5164,9 +5218,11 @@
             intervalMinRow.style.fontSize = '13px';
             intervalMinRow.style.fontWeight = '600';
             intervalMinRow.style.textAlign = 'left';
+            intervalMinRow.title = '相邻请求之间的最小延迟（毫秒）。用于防止被服务器限流。实际延迟会在最小值和最大值之间随机选择。';
             const intervalMinLabel = document.createElement('span');
-            intervalMinLabel.textContent = '刷新间隔最小值(ms):';
+            intervalMinLabel.textContent = '请求最小间隔(ms):';
             intervalMinLabel.style.flex = '1';
+            intervalMinLabel.title = '相邻请求之间的最小延迟（毫秒）。用于防止被服务器限流。实际延迟会在最小值和最大值之间随机选择。';
             const intervalMinInput = document.createElement('input');
             intervalMinInput.type = 'number';
             intervalMinInput.value = refreshIntervalMin;
@@ -5198,9 +5254,11 @@
             intervalMaxRow.style.fontSize = '13px';
             intervalMaxRow.style.fontWeight = '600';
             intervalMaxRow.style.textAlign = 'left';
+            intervalMaxRow.title = '相邻请求之间的最大延迟（毫秒）。实际延迟会在最小值和最大值之间随机选择，避免规律性请求被检测。';
             const intervalMaxLabel = document.createElement('span');
-            intervalMaxLabel.textContent = '刷新间隔最大值(ms):';
+            intervalMaxLabel.textContent = '请求最大间隔(ms):';
             intervalMaxLabel.style.flex = '1';
+            intervalMaxLabel.title = '相邻请求之间的最大延迟（毫秒）。实际延迟会在最小值和最大值之间随机选择，避免规律性请求被检测。';
             const intervalMaxInput = document.createElement('input');
             intervalMaxInput.type = 'number';
             intervalMaxInput.value = refreshIntervalMax;
@@ -5230,8 +5288,9 @@
             downloadSettingsRow.style.cursor = 'pointer';
             downloadSettingsRow.style.textAlign = 'left';
             const downloadSettingsLabel = document.createElement('span');
-            downloadSettingsLabel.textContent = '🔧 种子抓取设置';
+            downloadSettingsLabel.textContent = '🔧 网络操作设置';
             downloadSettingsLabel.style.flex = '0';
+            downloadSettingsLabel.title = '配置所有批量操作（查询、下载、验证等）的并发数和请求间隔';
             const downloadSettingsArrow = document.createElement('span');
             downloadSettingsArrow.textContent = '▸';
             downloadSettingsArrow.style.fontSize = '12px';
@@ -5252,8 +5311,11 @@
             downloadSettingsWrapper.style.overflowY = 'auto';
             downloadSettingsWrapper.style.width = 'calc(100% - 12px)';
 
+            // 种子信息相关设置
             downloadSettingsWrapper.appendChild(autoRefreshRow);
             downloadSettingsWrapper.appendChild(hoverRefreshRow);
+            downloadSettingsWrapper.appendChild(downloadCacheRow);
+            downloadSettingsWrapper.appendChild(downloadCacheTimeoutRow);
 
             const submenuSeparator1 = document.createElement('div');
             submenuSeparator1.style.height = '1px';
@@ -5262,19 +5324,10 @@
             submenuSeparator1.style.margin = '6px 0';
             downloadSettingsWrapper.appendChild(submenuSeparator1);
 
+            // 批量操作相关设置
             downloadSettingsWrapper.appendChild(concurrentRow);
             downloadSettingsWrapper.appendChild(intervalMinRow);
             downloadSettingsWrapper.appendChild(intervalMaxRow);
-
-            const submenuSeparator2 = document.createElement('div');
-            submenuSeparator2.style.height = '1px';
-            submenuSeparator2.style.background = '#e0e0e0';
-            submenuSeparator2.style.opacity = '0.18';
-            submenuSeparator2.style.margin = '6px 0';
-            downloadSettingsWrapper.appendChild(submenuSeparator2);
-
-            downloadSettingsWrapper.appendChild(downloadCacheRow);
-            downloadSettingsWrapper.appendChild(downloadCacheTimeoutRow);
 
             let downloadSettingsHideTimer = null;
 
@@ -6469,7 +6522,7 @@
             font-weight: 600;
             display: ${autoQuery ? 'none' : 'inline-block'};
         `;
-        queryBtn.addEventListener('click', () => performBatchQuery());
+        queryBtn.addEventListener('click', async () => await performBatchQuery());
         buttonArea.appendChild(queryBtn);
         
         const clearBtn = document.createElement('button');
@@ -6529,16 +6582,21 @@
             }
             fetchAllBtn.disabled = true;
             fetchAllBtn.textContent = `获取中(0/${fetchButtons.length})`;
-            let completed = 0;
-            for (const btn of fetchButtons) {
+            // 使用并发控制替代顺序点击
+            // 构建任务数组，每个任务点击一个按钮并等待
+            const fetchTasks = fetchButtons.map((btn) => async () => {
                 if (!btn.disabled) {
+                    // 先延迟后点击，避免过快
+                    await new Promise(r => setTimeout(r, getRandomInterval()));
                     btn.click();
-                    // 简单延迟以避免过快
-                    await new Promise(r => setTimeout(r, 200));
                 }
-                completed++;
-                fetchAllBtn.textContent = `获取中(${completed}/${fetchButtons.length})`;
-            }
+            });
+            
+            // 执行并发获取
+            await executeWithConcurrencyLimit(fetchTasks, null, (completed, total) => {
+                fetchAllBtn.textContent = `获取中(${completed}/${total})`;
+            });
+            
             fetchAllBtn.disabled = false;
             fetchAllBtn.textContent = '全部获取';
             
@@ -6959,7 +7017,7 @@
             // 自动查询模式：实时抓取归档信息
             if (isAutoMode && queryItems.some(item => item.type === 'gid-with-token')) {
                 const autoQueryItems = queryItems.filter(item => item.type === 'gid-with-token');
-                handleAutoModeQuery(autoQueryItems);
+                await handleAutoModeQuery(autoQueryItems);
                 return;
             }
 
@@ -7214,8 +7272,8 @@
                 if (itemsNeedTitle.length > 0) {
                     resultContainer.innerHTML = '<div style="text-align:center; color:#999;">正在获取画廊基本信息... 0/' + itemsNeedTitle.length + '</div>';
                     
-                    for (let i = 0; i < itemsNeedTitle.length; i++) {
-                        const item = itemsNeedTitle[i];
+                    // 使用并发控制替代顺序循环获取标题
+                    const titleFetchTasks = itemsNeedTitle.map((item) => async () => {
                         try {
                             // 只获取画廊基本信息（标题等），不获取归档成本
                             // 需要用户手动点击"获取"按钮才会查询GP和大小
@@ -7345,9 +7403,12 @@
                                 });
                             }
                         }
-                        
-                        resultContainer.innerHTML = '<div style="text-align:center; color:#999;">正在获取画廊基本信息... ' + (i + 1) + '/' + itemsNeedTitle.length + '</div>';
-                    }
+                    });
+
+                    // 执行并发标题获取，使用进度回调更新 UI
+                    await executeWithConcurrencyLimit(titleFetchTasks, null, (completed, total) => {
+                        resultContainer.innerHTML = '<div style="text-align:center; color:#999;">正在获取画廊基本信息... ' + completed + '/' + total + '</div>';
+                    });
                 }
 
                 console.log('[批量查询] 匹配结果数:', allEntries.length);
@@ -7450,173 +7511,135 @@
 
             // 根据模式执行对应的查询函数
             if (isAutoMode) {
-                handleAutoModeQuery(queryItems);
+                await handleAutoModeQuery(queryItems);
             } else {
-                handleManualModeQuery();
+                await handleManualModeQuery();
             }
         };
 
         // 自动查询模式的处理函数
         const handleAutoModeQuery = async (autoQueryItems) => {
-            const results = [];
-            let completed = 0;
-
-            resultContainer.innerHTML = '<div style="text-align:center; color:#999;">正在查询 0/' + autoQueryItems.length + '...</div>';
-
-            for (const item of autoQueryItems) {
-                try {
-                    // 第一步：获取画廊基本信息（标题等）
-                    const baseInfo = queryFromRecentBatches(item.value) || {};
-                    
-                    // 如果没有发布时间，尝试从当前页面DOM中获取
-                    if (!baseInfo.postedTime) {
-                        const postedElement = document.getElementById(`posted_${item.value}`);
-                        if (postedElement) {
-                            baseInfo.postedTime = postedElement.textContent.trim();
-                        }
-                    }
-                    
-                    // 第二步：根据"自动获取归档信息"设置决定是否获取费用
-                    let archiveInfo = null;
-                    if (autoFetchBatchQuery) {
-                        // 如果勾选了"自动获取"，自动查询费用信息
-                        archiveInfo = await fetchArchiveInfo(item.value, item.token);
-                    }
-                    
-                    // 检查是否已存在相同的gID
-                    const existingAutoIndex = results.findIndex(r => String(r.gallery?.gid) === String(item.value));
-                    
-                    if (archiveInfo) {
-                        if (existingAutoIndex >= 0) {
-                            // 更新已有项，增加重复计数
-                            results[existingAutoIndex].size = archiveInfo.size;
-                            results[existingAutoIndex].cost = archiveInfo.cost;
-                            results[existingAutoIndex].duplicateCount = (results[existingAutoIndex].duplicateCount || 1) + 1;
-                        } else {
-                            // 添加新项
-                            results.push({
-                                gallery: {
-                                    gid: item.value,
-                                    token: item.token,
-                                    href: baseInfo.href || `https://e-hentai.org/g/${item.value}/${item.token}/`,
-                                },
-                                name: baseInfo.title || item.title || '未知',
-                                archiveUrl: baseInfo.archiveUrl || '',
-                                archiveDltype: baseInfo.archiveDltype || '',
-                                size: archiveInfo.size,
-                                cost: archiveInfo.cost,
-                                postedTime: baseInfo.postedTime || '',
-                                batchOperationText: baseInfo.batchOperationText || '',
-                                source: 'auto-query',
-                                duplicateCount: 1,
-                            });
-                        }
-                    } else {
-                        // 即使获取归档信息失败，也显示基本信息
-                        if (existingAutoIndex >= 0) {
-                            // 更新已有项，增加重复计数
-                            results[existingAutoIndex].duplicateCount = (results[existingAutoIndex].duplicateCount || 1) + 1;
-                        } else {
-                            // 添加新项
-                            results.push({
-                                gallery: {
-                                    gid: item.value,
-                                    token: item.token,
-                                    href: baseInfo.href || `https://e-hentai.org/g/${item.value}/${item.token}/`,
-                                },
-                                name: baseInfo.title || item.title || '未知',
-                                archiveUrl: baseInfo.archiveUrl || '',
-                                archiveDltype: baseInfo.archiveDltype || '',
-                                size: '待获取',
-                                cost: '待获取',
-                                postedTime: baseInfo.postedTime || '',
-                                batchOperationText: baseInfo.batchOperationText || '',
-                                source: 'auto-query',
-                                duplicateCount: 1,
-                            });
-                        }
-                    }
-                } catch (err) {
-                    console.warn(`[自动查询] 查询 ${item.value} 失败:`, err);
-                    // 检查是否已存在相同的gID
-                    const existingErrorIndex = results.findIndex(r => String(r.gallery?.gid) === String(item.value));
-                    
-                    if (existingErrorIndex >= 0) {
-                        // 更新已有的失败项，增加重复计数
-                        results[existingErrorIndex].duplicateCount = (results[existingErrorIndex].duplicateCount || 1) + 1;
-                    } else {
-                        // 添加新的失败项
-                        results.push({
-                            gallery: {
-                                gid: item.value,
-                                token: item.token,
-                                href: `https://e-hentai.org/g/${item.value}/${item.token}/`,
-                            },
-                            name: '未知',
-                            archiveUrl: '',
-                            archiveDltype: '',
-                            size: '失败',
-                            cost: '失败',
-                            source: 'auto-query',
-                            duplicateCount: 1,
-                        });
+            // 第一步：创建初始的 results 数组（所有项都显示"待获取"）
+            const results = autoQueryItems.map((item) => {
+                const baseInfo = queryFromRecentBatches(item.value) || {};
+                
+                // 如果没有发布时间，尝试从当前页面DOM中获取
+                if (!baseInfo.postedTime) {
+                    const postedElement = document.getElementById(`posted_${item.value}`);
+                    if (postedElement) {
+                        baseInfo.postedTime = postedElement.textContent.trim();
                     }
                 }
                 
-                completed++;
-                resultContainer.innerHTML = '<div style="text-align:center; color:#999;">正在查询 ' + completed + '/' + autoQueryItems.length + '...</div>';
-            }
+                return {
+                    gallery: {
+                        gid: item.value,
+                        token: item.token,
+                        href: baseInfo.href || `https://e-hentai.org/g/${item.value}/${item.token}/`,
+                    },
+                    name: baseInfo.title || item.title || '未知',
+                    archiveUrl: baseInfo.archiveUrl || '',
+                    archiveDltype: baseInfo.archiveDltype || '',
+                    size: '待获取',
+                    cost: '待获取',
+                    postedTime: baseInfo.postedTime || '',
+                    batchOperationText: baseInfo.batchOperationText || '',
+                    source: 'auto-query',
+                    duplicateCount: 1,
+                };
+            });
 
+            // 第二步：立即渲染初始列表
             if (results.length === 0) {
                 resultContainer.innerHTML = '<div style="color:#d9534f;">未能获取任何画廊的归档信息</div>';
                 return;
             }
-
-            // 在自动查询模式下，如果启用了"自动获取"，提前设置标志
-            // 这样当renderBatchQueryResults自动点击"全部获取"时不会显示提示
+            
+            // 设置自动点击标志
             if (autoFetchCheckbox && autoFetchCheckbox.checked) {
                 isAutoClickingFetchAll = true;
             }
             
-            // 分离有效和无效（未知）的项
-            const validAutoResults = results.filter(entry => entry.name !== '未知');
-            const unknownAutoResults = results.filter(entry => entry.name === '未知');
-            
-            // 计算已找到的值（gID和磁链都要考虑，只考虑有效项）
-            const foundValues = new Set();
-            validAutoResults.forEach(entry => {
-                if (entry.gallery?.gid) foundValues.add(String(entry.gallery.gid));
-                if (entry.magnet) foundValues.add(entry.magnet);
-            });
-            
-            // 计算被尝试查询过的项（无论成功失败）
-            const queriedValues = new Set();
-            results.forEach(entry => {
-                if (entry.gallery?.gid) queriedValues.add(String(entry.gallery.gid));
-            });
-            
-            // 未查询到的项 = 查询项 - 已找到的值 - 被尝试查询过的值
-            let unfoundAutoItems = autoQueryItems.filter(item => !foundValues.has(item.value) && !queriedValues.has(item.value));
-            
-            // 对未查询到的项进行去重和计数
-            const unfoundAutoMap = new Map(); // value => { item, count }
-            unfoundAutoItems.forEach(item => {
-                if (unfoundAutoMap.has(item.value)) {
-                    unfoundAutoMap.get(item.value).count += 1;
-                } else {
-                    unfoundAutoMap.set(item.value, { item, count: 1 });
+            renderBatchQueryResults(results, resultContainer, selectedCountSpan, fetchAllBtn, autoFetchCheckbox, { value: isAutoClickingFetchAll }, [], [], results.length, results.length);
+
+            // 第三步：后台异步查询并动态更新每个项目的信息
+            if (!autoFetchBatchQuery) {
+                // 如果未勾选"自动获取"，不需要后台查询
+                return;
+            }
+
+            // 使用并发控制执行后台查询
+            // 构建任务数组，每个任务是一个异步函数
+            const tasks = autoQueryItems.map((item, index) => async () => {
+                try {
+                    // 查询归档信息
+                    const archiveInfo = await fetchArchiveInfo(item.value, item.token);
+                    
+                    // 更新对应位置的结果
+                    if (archiveInfo) {
+                        results[index].size = archiveInfo.size;
+                        results[index].cost = archiveInfo.cost;
+                    } else {
+                        results[index].size = '待获取';
+                        results[index].cost = '待获取';
+                    }
+                } catch (err) {
+                    console.warn(`[自动查询] 查询 ${item.value} 失败:`, err);
+                    results[index].size = '失败';
+                    results[index].cost = '失败';
                 }
+                
+                // 动态更新 DOM 中的该项信息
+                const checkboxes = resultContainer.querySelectorAll(`input[data-gid="${item.value}"]`);
+                checkboxes.forEach(checkbox => {
+                    const itemDiv = checkbox.closest('div[style*="border-bottom"]');
+                    if (itemDiv) {
+                        const costSpan = itemDiv.querySelector('span[style*="min-width: 80px"]');
+                        if (costSpan) {
+                            costSpan.textContent = `${results[index].size} | ${results[index].cost}`;
+                            // 改变文字颜色为黑色，表示已获取
+                            if (results[index].size !== '失败' && results[index].size !== '待获取') {
+                                costSpan.style.color = '#333';
+                            } else {
+                                costSpan.style.color = '#d9534f';  // 失败时显示红色
+                            }
+                        }
+                        
+                        // 同时更新"获取"按钮的样式
+                        const fetchBtn = itemDiv.querySelector('button:last-child');
+                        if (fetchBtn) {
+                            if (results[index].size !== '失败' && results[index].size !== '待获取') {
+                                // 成功获取：显示对勾
+                                fetchBtn.textContent = '✓';
+                                fetchBtn.style.background = '#e8f5e9';
+                                fetchBtn.style.cursor = 'default';
+                                fetchBtn.disabled = true;
+                                fetchBtn.title = '归档信息已获取';
+                            } else if (results[index].size === '失败') {
+                                // 失败：显示感叹号
+                                fetchBtn.textContent = '!';
+                                fetchBtn.style.background = '#ffebee';
+                                fetchBtn.style.cursor = 'pointer';
+                                fetchBtn.disabled = false;
+                                fetchBtn.title = '获取失败，点击重试';
+                            }
+                        }
+                    }
+                });
             });
-            unfoundAutoItems = Array.from(unfoundAutoMap.values()).map(entry => ({
-                ...entry.item,
-                duplicateCount: entry.count,
-            }));
+
+            // 执行并发查询，使用进度回调更新 UI（在列表下方显示进度，不覆盖列表）
+            const progressDiv = document.createElement('div');
+            progressDiv.style.cssText = 'text-align: center; color: #999; padding: 8px; font-size: 12px;';
+            progressDiv.textContent = '正在获取 0/' + autoQueryItems.length + '...';
+            resultContainer.appendChild(progressDiv);
             
-            // 将所有项传给渲染函数（有效项 + 无效项），但渲染时会特别处理
-            const allAutoResultsWithInvalid = [...validAutoResults, ...unknownAutoResults];
-            // 总数 = 有效项 + 无效项 + 未找到的项
-            const totalAutoCount = validAutoResults.length + unknownAutoResults.length + unfoundAutoItems.length;
-            renderBatchQueryResults(allAutoResultsWithInvalid, resultContainer, selectedCountSpan, fetchAllBtn, autoFetchCheckbox, { value: isAutoClickingFetchAll }, unfoundAutoItems, [], validAutoResults.length, totalAutoCount);
+            await executeWithConcurrencyLimit(tasks, null, (completed, total) => {
+                progressDiv.textContent = '正在获取 ' + completed + '/' + total + '...';
+            });
+            
+            // 获取完成后移除进度显示
+            progressDiv.remove();
         };
 
         const sendSelectedToDM = async () => {
@@ -7751,8 +7774,8 @@
         // 自动查询：如果是自动模式且有查询条目，则自动触发查询
         if (autoQuery && queryEntries.length > 0) {
             // 延迟执行以确保 DOM 已准备好
-            setTimeout(() => {
-                performBatchQuery(true);
+            setTimeout(async () => {
+                await performBatchQuery(true);
             }, 100);
         }
     };
@@ -8324,8 +8347,9 @@
             
             // 如果还在等待，继续下一轮重试
             if (result.waiting) {
-                console.log(`[verifyLink] 等待 1 秒后进行第 ${attempt + 1} 次尝试...`);
-                await new Promise(r => setTimeout(r, 1000));
+                const interval = getRandomInterval();
+                console.log(`[verifyLink] 等待 ${interval}ms 后进行第 ${attempt + 1} 次尝试...`);
+                await new Promise(r => setTimeout(r, interval));
             }
         }
     };
@@ -8334,12 +8358,13 @@
         const indicators = container.querySelectorAll('.archive-status-indicator');
         const statusTexts = container.querySelectorAll('span[style*="min-width: 100px"]');
 
-        for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
+        // 使用并发控制替代顺序循环处理验证
+        // 构建任务数组，每个任务处理一个 entry 的验证
+        const verificationTasks = entries.map((entry, i) => async () => {
             const statusDiv = indicators[i];
             const statusText = statusTexts[i];
 
-            if (!statusDiv || !statusText) continue;
+            if (!statusDiv || !statusText) return;
 
             try {
                 // 第一步：先触发归档生成（提交表单，扣 GP）
@@ -8441,7 +8466,7 @@
                         for (let retryCount = 0; retryCount < 5; retryCount++) {
                             console.log(`[performBatchVerification] 等待后重试 (${retryCount + 1}/5)...`);
                             statusText.textContent = `生成中 (${retryCount + 1}/5)...`;
-                            await new Promise(r => setTimeout(r, 2000));
+                            await new Promise(r => setTimeout(r, getRandomInterval()));
 
                             verifyResult = await verifyArchiveLink(entry.gallery.gid, entry.gallery.token);
                             entry._verifyStatus = verifyResult.status;
@@ -8486,7 +8511,13 @@
 
             // 简单延迟以避免过快
             await new Promise(r => setTimeout(r, 500));
-        }
+        });
+
+        // 执行并发验证，使用进度回调更新 UI
+        await executeWithConcurrencyLimit(verificationTasks, null, (completed, total) => {
+            // 可以在这里更新全局进度显示
+            console.log(`[performBatchVerification] 验证进度: ${completed}/${total}`);
+        });
 
         // 验证完成后，检查是否全部准备好
         if (verificationState && verificationState.isInitial) {
@@ -8834,7 +8865,8 @@
         updateSelectedCount();
         
         // 如果勾选了"自动获取"，则在渲染完成后自动点击"全部获取"
-        if (autoFetchCheckboxRef && autoFetchCheckboxRef.checked) {
+        // 但在自动查询模式下，已经在后台异步执行了查询，所以不需要再点击按钮
+        if (autoFetchCheckboxRef && autoFetchCheckboxRef.checked && !isAutoClickingFetchAllRef?.value) {
             setTimeout(() => {
                 if (fetchAllBtnRef) {
                     fetchAllBtnRef.click();
@@ -10739,30 +10771,34 @@
         let completed = 0;  // 追踪本批次的完成数
         
         // 使用magnetRequestQueue进行刷新（使用高优先级加速处理）
-        const refreshPromises = pendingEntries.map((entry, index) => {
-            return magnetRequestQueue.execute(async () => {
-                try {
-                    // 刷新该画廊的信息
-                    const success = await refreshSingleGalleryInfo(entry);
-                    if (success) {
-                        refreshed++;
-                    } else {
-                        failed++;
-                    }
-                    completed++;
-                    
-                    // 更新全局队列的计数器以显示本批次进度
-                    magnetRequestQueue.completedTasks = completed;
-                    magnetRequestQueue.updateProgress();
-                } catch (err) {
-                    console.warn(`[批量刷新] 刷新画廊 ${entry.info?.gid} 失败:`, err);
+        // 使用并发控制替代 Promise.all 的无限制并发
+        // 不再使用 magnetRequestQueue，改用 executeWithConcurrencyLimit
+        const refreshTasks = pendingEntries.map((entry, index) => async () => {
+            try {
+                // 刷新该画廊的信息
+                const success = await refreshSingleGalleryInfo(entry);
+                if (success) {
+                    refreshed++;
+                } else {
                     failed++;
-                    completed++;
                 }
-            }, 50, `refresh-pending-${entry.info?.gid}`, entry.row);  // 提升优先级到 50，与刷新全部画廊一致
+                completed++;
+                
+                // 更新全局队列的计数器以显示本批次进度
+                magnetRequestQueue.completedTasks = completed;
+                magnetRequestQueue.updateProgress();
+            } catch (err) {
+                console.warn(`[批量刷新] 刷新画廊 ${entry.info?.gid} 失败:`, err);
+                failed++;
+                completed++;
+            }
         });
         
-        await Promise.all(refreshPromises);
+        // 使用 executeWithConcurrencyLimit 控制并发，而不是 Promise.all
+        await executeWithConcurrencyLimit(refreshTasks, null, (c, t) => {
+            magnetRequestQueue.completedTasks = c;
+            magnetRequestQueue.updateProgress();
+        });
         
         // 额外等待以确保所有 DOM 更新完成
         // injectingSet 应该已经清空，但给浏览器额外时间处理 DOM
@@ -12153,7 +12189,8 @@
                             }
                             
                             const tasks = [];
-                            for (const item of readyItems) {
+                            // 使用并发控制替代顺序循环
+                            const fetchTasks = readyItems.map((item, idx) => async () => {
                                 try {
                                     const archiveInfo = await fetchArchiveDownloadInfo({
                                         gid: item.gid,
@@ -12181,7 +12218,12 @@
                                 } catch (err) {
                                     console.warn(`获取 GID ${item.gid} 的归档链接失败:`, err);
                                 }
-                            }
+                            });
+                            
+                            // 执行并发获取归档下载链接
+                            await executeWithConcurrencyLimit(fetchTasks, null, (completed, total) => {
+                                console.log(`[发送下载] 获取归档链接进度: ${completed}/${total}`);
+                            });
                             
                             if (tasks.length > 0) {
                                 const results = await api.enqueueTasks(tasks);
@@ -12517,6 +12559,7 @@
                 outdatedSubSection.appendChild(outdatedLabel);
                 
                 let outdatedTotal = 0;
+                const outdatedItems = [];  // 收集需要获取信息的项和对应的DOM元素
                 for (const entry of classified.outdated) {
                     const itemDiv = document.createElement('div');
                     itemDiv.style.cssText = 'display: flex; align-items: center; margin-bottom: 6px; font-size: 11px;';
@@ -12532,30 +12575,50 @@
                     label.style.cssText = 'flex: 1; color: #333;';
                     itemDiv.appendChild(label);
                     
-                    // 获取和显示GP信息（异步）
-                    (async () => {
-                        try {
-                            const archiveInfo = await fetchArchiveInfo(entry.info?.gid, entry.info?.token);
-                            if (archiveInfo) {
-                                const gpSpan = document.createElement('span');
-                                gpSpan.style.cssText = 'margin-left: 8px; color: #ff9800; white-space: nowrap;';
-                                gpSpan.textContent = `${archiveInfo.size} | ${archiveInfo.cost}`;
-                                itemDiv.appendChild(gpSpan);
-                                
-                                // 提取数字用于求和
-                                const costMatch = archiveInfo.cost.match(/\d+/);
-                                if (costMatch) {
-                                    outdatedTotal += parseInt(costMatch[0]);
-                                }
-                            }
-                        } catch (e) {
-                            console.warn('获取归档信息失败', e);
-                        }
-                    })();
+                    // 创建占位符span（后续会被更新）
+                    const gpSpan = document.createElement('span');
+                    gpSpan.style.cssText = 'margin-left: 8px; color: #999; white-space: nowrap;';
+                    gpSpan.textContent = '获取中...';
+                    itemDiv.appendChild(gpSpan);
                     
+                    outdatedItems.push({ entry, itemDiv, gpSpan });
                     outdatedSubSection.appendChild(itemDiv);
                     entry._checkbox = checkbox;
                 }
+                
+                // 使用并发控制获取归档信息
+                const outdatedFetchTasks = outdatedItems.map((item) => async () => {
+                    try {
+                        const archiveInfo = await fetchArchiveInfo(item.entry.info?.gid, item.entry.info?.token);
+                        // 检查 gpSpan 是否仍然存在于 DOM 中（防止对话框已关闭）
+                        if (!item.gpSpan || !document.body.contains(item.gpSpan)) {
+                            return;
+                        }
+                        if (archiveInfo) {
+                            item.gpSpan.style.color = '#ff9800';
+                            item.gpSpan.textContent = `${archiveInfo.size} | ${archiveInfo.cost}`;
+                            
+                            // 提取数字用于求和
+                            const costMatch = archiveInfo.cost.match(/\d+/);
+                            if (costMatch) {
+                                outdatedTotal += parseInt(costMatch[0]);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('获取归档信息失败', e);
+                        // 检查 gpSpan 是否仍然存在
+                        if (item.gpSpan && document.body.contains(item.gpSpan)) {
+                            item.gpSpan.style.color = '#999';
+                            item.gpSpan.textContent = '获取失败';
+                        }
+                    }
+                });
+                
+                // 在后台执行并发获取（不阻塞对话框显示）
+                // 不使用 await，让对话框立即显示
+                executeWithConcurrencyLimit(outdatedFetchTasks, null).catch(err => {
+                    console.warn('[存档选择] outdated 区域获取信息失败:', err);
+                });
                 
                 archiveSection.appendChild(outdatedSubSection);
             }
@@ -12571,6 +12634,7 @@
                 noseedSubSection.appendChild(noseedLabel);
                 
                 let noseedTotal = 0;
+                const noSeedItems = [];  // 收集需要获取信息的项和对应的DOM元素
                 for (const entry of classified.noSeed) {
                     const itemDiv = document.createElement('div');
                     itemDiv.style.cssText = 'display: flex; align-items: center; margin-bottom: 6px; font-size: 11px;';
@@ -12586,29 +12650,49 @@
                     label.style.cssText = 'flex: 1; color: #333;';
                     itemDiv.appendChild(label);
                     
-                    // 获取和显示GP信息
-                    (async () => {
-                        try {
-                            const archiveInfo = await fetchArchiveInfo(entry.info?.gid, entry.info?.token);
-                            if (archiveInfo) {
-                                const gpSpan = document.createElement('span');
-                                gpSpan.style.cssText = 'margin-left: 8px; color: #f44336; white-space: nowrap;';
-                                gpSpan.textContent = `${archiveInfo.size} | ${archiveInfo.cost}`;
-                                itemDiv.appendChild(gpSpan);
-                                
-                                const costMatch = archiveInfo.cost.match(/\d+/);
-                                if (costMatch) {
-                                    noseedTotal += parseInt(costMatch[0]);
-                                }
-                            }
-                        } catch (e) {
-                            console.warn('获取归档信息失败', e);
-                        }
-                    })();
+                    // 创建占位符span（后续会被更新）
+                    const gpSpan = document.createElement('span');
+                    gpSpan.style.cssText = 'margin-left: 8px; color: #999; white-space: nowrap;';
+                    gpSpan.textContent = '获取中...';
+                    itemDiv.appendChild(gpSpan);
                     
+                    noSeedItems.push({ entry, itemDiv, gpSpan });
                     noseedSubSection.appendChild(itemDiv);
                     entry._checkbox = checkbox;
                 }
+                
+                // 使用并发控制获取归档信息
+                const noSeedFetchTasks = noSeedItems.map((item) => async () => {
+                    try {
+                        const archiveInfo = await fetchArchiveInfo(item.entry.info?.gid, item.entry.info?.token);
+                        // 检查 gpSpan 是否仍然存在于 DOM 中（防止对话框已关闭）
+                        if (!item.gpSpan || !document.body.contains(item.gpSpan)) {
+                            return;
+                        }
+                        if (archiveInfo) {
+                            item.gpSpan.style.color = '#f44336';
+                            item.gpSpan.textContent = `${archiveInfo.size} | ${archiveInfo.cost}`;
+                            
+                            const costMatch = archiveInfo.cost.match(/\d+/);
+                            if (costMatch) {
+                                noseedTotal += parseInt(costMatch[0]);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('获取归档信息失败', e);
+                        // 检查 gpSpan 是否仍然存在
+                        if (item.gpSpan && document.body.contains(item.gpSpan)) {
+                            item.gpSpan.style.color = '#999';
+                            item.gpSpan.textContent = '获取失败';
+                        }
+                    }
+                });
+                
+                // 在后台执行并发获取（不阻塞对话框显示）
+                // 不使用 await，让对话框立即显示
+                executeWithConcurrencyLimit(noSeedFetchTasks, null).catch(err => {
+                    console.warn('[存档选择] noSeed 区域获取信息失败:', err);
+                });
                 
                 archiveSection.appendChild(noseedSubSection);
             }
@@ -12716,7 +12800,8 @@
                             }
                             
                             const tasks = [];
-                            for (const item of readyItems) {
+                            // 使用并发控制替代顺序循环
+                            const fetchTasks = readyItems.map((item, idx) => async () => {
                                 try {
                                     const archiveInfo = await fetchArchiveDownloadInfo({
                                         gid: item.gid,
@@ -12744,7 +12829,12 @@
                                 } catch (err) {
                                     console.warn(`获取 GID ${item.gid} 的归档链接失败:`, err);
                                 }
-                            }
+                            });
+                            
+                            // 执行并发获取归档下载链接
+                            await executeWithConcurrencyLimit(fetchTasks, null, (completed, total) => {
+                                console.log(`[发送下载] 获取归档链接进度: ${completed}/${total}`);
+                            });
                             
                             if (tasks.length > 0) {
                                 const results = await api.enqueueTasks(tasks);
@@ -12827,9 +12917,12 @@
                             // 【修复】不用await，让无种的发送与有种的操作并行进行
                             toastInfo(`正在处理 ${checkedArchive.length} 个无种画廊的归档...`);
                             showArchivePreCheckDialog(toArchiveEntries, async (readyItems) => {
-                                // 发送到Aria2
+                                // 发送到Aria2 - 使用并发控制替代顺序循环
                                 const tasks = [];
-                                for (const item of readyItems) {
+                                const archiveInfoResults = [];
+                                
+                                // 构建并发任务
+                                const fetchTasks = readyItems.map((item, idx) => async () => {
                                     try {
                                         const archiveInfo = await fetchArchiveDownloadInfo({
                                             gid: item.gid,
@@ -12857,7 +12950,12 @@
                                     } catch (err) {
                                         console.warn(`获取 GID ${item.gid} 的归档链接失败:`, err);
                                     }
-                                }
+                                });
+                                
+                                // 执行并发获取归档下载链接
+                                await executeWithConcurrencyLimit(fetchTasks, null, (completed, total) => {
+                                    console.log(`[发送下载] 获取归档链接进度: ${completed}/${total}`);
+                                });
                                 
                                 if (tasks.length > 0) {
                                     const api = getAriaEhAPI();
@@ -15782,11 +15880,14 @@
             }
 
             // 打开批量查询界面并自动查询
-            Promise.resolve(showBatchQueryDialog({ autoQuery: true, queryEntries }))
-                .catch((err) => {
+            (async () => {
+                try {
+                    await showBatchQueryDialog({ autoQuery: true, queryEntries });
+                } catch (err) {
                     console.warn('打开批量查询界面失败', err);
                     toastError(`失败：${err?.message || err}`);
-                });
+                }
+            })();
             return;
         }
         if (action === 'mark-selected') {
@@ -17162,7 +17263,7 @@
                     <div style="margin: 8px 0; padding-left: 20px; text-align: left;">
                         <div><strong>自动刷新</strong> - 打开页面时是否自动获取种子信息</div>
                         <div><strong>鼠标悬停刷新</strong> - 悬停时自动刷新该画廊</div>
-                        <div><strong>种子抓取设置</strong> - 配置并发数、缓存超时时限等</div>
+                        <div><strong>网络操作设置</strong> - 配置所有批量操作（查询、下载、验证等）的并发数和请求间隔</div>
                         <div><strong>🡇 归档下载</strong> - 快捷发送到AB DM（消耗GP）</div>
                     </div>
                 </div>

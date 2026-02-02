@@ -9,7 +9,7 @@
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @license MIT
-// @version     1.7.0
+// @version     1.7.1
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -908,9 +908,23 @@
                 headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
             }
 
+            let encodedQuery;
+            try {
+                encodedQuery = encodeURIComponent(searchQuery);
+            } catch (err) {
+                console.warn(`[LRR Checker] encodeURIComponent 失败，使用原始 query:`, err);
+                // 回退方案：使用 encodeURI（较宽松的编码）
+                try {
+                    encodedQuery = encodeURI(searchQuery);
+                } catch (err2) {
+                    console.warn(`[LRR Checker] encodeURI 也失败，使用原始字符串`);
+                    encodedQuery = searchQuery;
+                }
+            }
+
             const response = await makeRequest({
                 method: 'GET',
-                url: `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodeURIComponent(searchQuery)}`,
+                url: `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodedQuery}`,
                 headers: headers
             });
 
@@ -1690,7 +1704,21 @@
             }
         }
 
-        const randomSearchUrl = `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodeURIComponent(searchQuery)}`;
+        let encodedQuery;
+        try {
+            encodedQuery = encodeURIComponent(searchQuery);
+        } catch (err) {
+            console.warn(`[LRR Checker] performAlternativeSearch: encodeURIComponent 失败，使用原始 query:`, err);
+            // 回退方案：使用 encodeURI（较宽松的编码）
+            try {
+                encodedQuery = encodeURI(searchQuery);
+            } catch (err2) {
+                console.warn(`[LRR Checker] performAlternativeSearch: encodeURI 也失败，使用原始字符串`);
+                encodedQuery = searchQuery;
+            }
+        }
+
+        const randomSearchUrl = `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodedQuery}`;
         const headers = {};
         if (CONFIG.lrrApiKey) {
             headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
