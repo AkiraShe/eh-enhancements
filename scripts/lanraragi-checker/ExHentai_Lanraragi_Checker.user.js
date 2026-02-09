@@ -9,7 +9,7 @@
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @license MIT
-// @version     1.7.2
+// @version     1.7.3
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -101,6 +101,42 @@
 
     // 当前配置
     let CONFIG = loadConfig();
+    // 全局停止标志：出现连接/认证失败后，停止后续画廊检索，需刷新页面恢复
+    let GLOBAL_STOP_ALL_CHECKS = false;
+    // 已显示认证警告的标记，避免重复弹窗
+    let AUTH_WARNING_SHOWN = false;
+    // 记录是否已判定 Key 失效
+    let KEY_INVALID_DETECTED = false;
+
+    // 简单的右上角提示
+    function showAuthWarningToast(messageLines) {
+        if (AUTH_WARNING_SHOWN) return;
+        AUTH_WARNING_SHOWN = true;
+        const toast = document.createElement('div');
+        toast.id = 'lrr-auth-warning-toast';
+        const lines = Array.isArray(messageLines) ? messageLines : [
+            'API Key 失效或未配置，当前依赖lrr浏览器登录。',
+            '请在设置中更新 API Key。'
+        ];
+        toast.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+        Object.assign(toast.style, {
+            position: 'fixed',
+            top: '20px',
+            right: '20px',
+            zIndex: '99999',
+            background: 'rgba(255, 165, 0, 0.95)',
+            color: '#111',
+            padding: '10px 14px',
+            borderRadius: '6px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+            fontSize: '14px',
+            fontWeight: '600',
+            cursor: 'pointer'
+        });
+        toast.onclick = () => toast.remove();
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 8000);
+    }
 
     // ===== 关键词工具函数 =====
     const CORE_SPLIT_RE = /[\s·・\-_:\/\\]+/g;
@@ -605,18 +641,21 @@
             // 确保 headers 不为 undefined，方便追加认证头
             if (!options.headers) options.headers = {};
 
-            // 若是访问 LRR 且配置了 API Key：附带 Base64 Bearer 头，并冗余携带原始 key 以兼容不同部署
-            if (CONFIG.lrrApiKey && options.url.startsWith(CONFIG.lrrServerUrl)) {
-                let encodedKey = CONFIG.lrrApiKey;
+            // 允许调用方传入 apiKeyOverride，用于测试连接时无需保存配置
+            const effectiveApiKey = (options.apiKeyOverride !== undefined) ? options.apiKeyOverride : CONFIG.lrrApiKey;
+
+            // 若是访问 LRR 且有有效 API Key：附带 Base64 Bearer 头，并冗余携带原始 key 以兼容不同部署
+            if (effectiveApiKey && options.url.startsWith(CONFIG.lrrServerUrl)) {
+                let encodedKey = effectiveApiKey;
                 try {
-                    encodedKey = btoa(CONFIG.lrrApiKey);
+                    encodedKey = btoa(effectiveApiKey);
                 } catch (e) {
                     console.warn('[LRR Checker] btoa 编码 API Key 失败，改用原始值', e);
                 }
                 options.headers['Authorization'] = `Bearer ${encodedKey}`;
-                options.headers['X-API-Key'] = CONFIG.lrrApiKey; // 某些反代方案使用自定义头
+                options.headers['X-API-Key'] = effectiveApiKey; // 某些反代方案使用自定义头
                 const sep = options.url.includes('?') ? '&' : '?';
-                options.url = `${options.url}${sep}apikey=${encodeURIComponent(CONFIG.lrrApiKey)}`;
+                options.url = `${options.url}${sep}apikey=${encodeURIComponent(effectiveApiKey)}`;
             }
 
             timeoutId = setTimeout(() => {
@@ -629,6 +668,9 @@
                 url: options.url,
                 headers: options.headers,
                 responseType: 'text',
+                // 匿名模式：不携带 Cookie / 认证信息
+                anonymous: options.anonymous === true,
+                withCredentials: options.anonymous === true ? false : undefined,
                 onload: function(response) {
                     clearTimeout(timeoutId);
                     // 认证/跨域排查：打印状态码与响应前200字
@@ -638,6 +680,17 @@
                     } catch (e) {
                         console.warn('[LRR Checker] 打印响应失败', e);
                     }
+                    // 401 视为认证错误，提示用户；由调用方决定是否停止流程
+            if (response.status === 401) {
+                const err = new Error('Unauthorized (401)');
+                err.isAuthError = true;
+                if (!options.suppressAuthToast) {
+                    KEY_INVALID_DETECTED = true;
+                    showAuthWarningToast();
+                }
+                reject(err);
+                return;
+            }
                     // status 0 可能是沙箱限制，但可能仍有 responseText
                     if (response.status === 0 && !response.responseText) {
                         console.warn(`[LRR Checker] Received empty response (status 0, no text)`);
@@ -683,6 +736,23 @@
     const markerRegistry = new Map();
     let markerIdCounter = 0;
     let markerDelegatesInitialized = false;
+
+    // 启动时主动验证 API Key（匿名请求，避免登录态掩盖问题）
+    (async () => {
+        if (!CONFIG.lrrApiKey) return;
+        try {
+            await makeRequest({
+                method: 'GET',
+                url: `${CONFIG.lrrServerUrl}/api/search/random?filter=${encodeURIComponent('lrr-key-probe')}`,
+                anonymous: true
+            });
+        } catch (err) {
+            if (err?.isAuthError) {
+                KEY_INVALID_DETECTED = true;
+                showAuthWarningToast();
+            }
+        }
+    })();
 
     function initMarkerDelegates() {
         if (markerDelegatesInitialized) return;
@@ -978,6 +1048,18 @@
 
     async function processGallery(gallery) {
         const { galleryUrl, titleElement, cacheKey } = gallery;
+        // 若先前已出现网络/认证致命错误，直接跳过，避免继续请求
+        if (GLOBAL_STOP_ALL_CHECKS) {
+            console.log('[LRR Checker] Global stop flag set, skipping gallery:', galleryUrl);
+            setFinalMarker(titleElement, {
+                type: MARKER_TYPES.ERROR,
+                icon: '⚠️',
+                label: 'LRR连接失败（已停止）',
+                className: 'lrr-marker-error'
+            });
+            return { success: false, galleryUrl, method: 'skipped', isNetworkError: true };
+        }
+
         const headers = {};
         if (CONFIG.lrrApiKey) {
             headers['Authorization'] = `Bearer ${CONFIG.lrrApiKey}`;
@@ -2019,6 +2101,10 @@
         // 不需要检查是否有最终标记，因为流程保证只调用一次
 
         if (result.success === 1 || result.success === true) {
+            // 若此前检测到 Key 失效，但凭借登录态成功，仍提示一次
+            if (KEY_INVALID_DETECTED) {
+                showAuthWarningToast();
+            }
             console.log(`[LRR Checker] Found: ${galleryUrl}`);
             // 兼容两种格式：gid/token搜索返回 { success: 1, data: {...} }，
             // performAlternativeSearch返回 { success: true, files: [...] }
@@ -2104,6 +2190,8 @@
         } else if (result.isNetworkError === true) {
             // 网络错误（LRR 服务器无法连接）
             console.log(`[LRR Checker] Network error occurred when searching: ${galleryUrl}`);
+            // 触发全局停止，直到用户刷新
+            GLOBAL_STOP_ALL_CHECKS = true;
             setFinalMarker(titleElement, {
                 type: MARKER_TYPES.ERROR,
                 icon: '⚠️',
@@ -3536,6 +3624,10 @@
                     <span>API 密钥（可选）</span>
                     <input type="text" id="lrrApiKey" value="${CONFIG.lrrApiKey}" placeholder="留空表示无需密钥" />
                 </label>
+                <div style="display:flex;gap:10px;align-items:center;margin-top:6px;">
+                    <button class="lrr-settings-btn lrr-settings-btn-primary" id="lrrTestConnectionBtn" type="button">测试连接</button>
+                    <span id="lrrTestConnectionResult" style="font-size:12px;color:#666;">用当前地址/API Key 发送测试请求</span>
+                </div>
             </div>
 
             <div class="lrr-settings-right">
@@ -3778,6 +3870,73 @@
 
         document.body.appendChild(mask);
         document.body.appendChild(panel);
+
+        // 绑定测试连接按钮
+        const testBtn = document.getElementById('lrrTestConnectionBtn');
+        const testResultSpan = document.getElementById('lrrTestConnectionResult');
+        if (testBtn) {
+            testBtn.onclick = async () => {
+                if (testResultSpan) {
+                    testResultSpan.textContent = '测试中...';
+                    testResultSpan.style.color = '#666';
+                }
+                const testUrl = document.getElementById('lrrServerUrl').value.trim() || DEFAULT_LRR_SERVER_URL;
+                const testKey = document.getElementById('lrrApiKey').value.trim() || '';
+                const formatTestError = (err) => {
+                    if (!err) return '未知错误';
+                    if (typeof err === 'string') return err;
+                    if (err.status) {
+                        return `HTTP ${err.status}${err.statusText ? ' ' + err.statusText : ''}`;
+                    }
+                    if (err.message) return err.message;
+                    return '请求失败';
+                };
+                try {
+                    const resp = await makeRequest({
+                        method: 'GET',
+                        url: `${testUrl}/api/search/random?filter=${encodeURIComponent('lrr-connection-test')}`,
+                        // 禁用 Cookie，确保真正测试 API Key 而非登录态
+                        anonymous: true,
+                        apiKeyOverride: testKey || null,
+                        suppressAuthToast: true
+                    });
+                    if (resp.status === 200) {
+                        if (testResultSpan) {
+                            testResultSpan.textContent = '测试成功，可正常访问。请点击“保存”以应用。';
+                            testResultSpan.style.color = '#1e8e3e';
+                        } else {
+                            alert('测试成功：服务器可访问，API Key 可用或服务器允许匿名访问');
+                        }
+                    } else {
+                        const msg = `测试返回状态 ${resp.status}，请检查服务器/Key`;
+                        if (testResultSpan) {
+                            testResultSpan.textContent = msg;
+                            testResultSpan.style.color = '#d93025';
+                        } else {
+                            alert(msg);
+                        }
+                    }
+                } catch (err) {
+                    const errMsg = formatTestError(err);
+                    if (err?.isAuthError) {
+                        if (testResultSpan) {
+                            testResultSpan.textContent = '测试失败：认证错误（请检查 API Key）';
+                            testResultSpan.style.color = '#d93025';
+                        } else {
+                            alert('测试失败：认证错误（请检查 API Key）');
+                        }
+                    } else {
+                        const msg = `测试失败：${errMsg}`;
+                        if (testResultSpan) {
+                            testResultSpan.textContent = msg;
+                            testResultSpan.style.color = '#d93025';
+                        } else {
+                            alert(msg);
+                        }
+                    }
+                }
+            };
+        }
     }
 
     function closeSettingsPanel() {
