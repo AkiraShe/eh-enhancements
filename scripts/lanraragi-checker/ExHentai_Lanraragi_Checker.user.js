@@ -9,7 +9,7 @@
 // @grant       GM_setValue
 // @grant       GM_registerMenuCommand
 // @license MIT
-// @version     1.7.1
+// @version     1.7.2
 // @author      Putarku, AkiraShe
 // @description Checks if galleries on ExHentai/E-Hentai are already in your Lanraragi library and marks them by inserting a span at the beginning of the title.
 // @homepage     https://github.com/AkiraShe/eh-enhancements
@@ -602,6 +602,22 @@
         return new Promise((resolve, reject) => {
             let timeoutId;
             const timeout = options.timeout || 30000; // 30秒超时
+            // 确保 headers 不为 undefined，方便追加认证头
+            if (!options.headers) options.headers = {};
+
+            // 若是访问 LRR 且配置了 API Key：附带 Base64 Bearer 头，并冗余携带原始 key 以兼容不同部署
+            if (CONFIG.lrrApiKey && options.url.startsWith(CONFIG.lrrServerUrl)) {
+                let encodedKey = CONFIG.lrrApiKey;
+                try {
+                    encodedKey = btoa(CONFIG.lrrApiKey);
+                } catch (e) {
+                    console.warn('[LRR Checker] btoa 编码 API Key 失败，改用原始值', e);
+                }
+                options.headers['Authorization'] = `Bearer ${encodedKey}`;
+                options.headers['X-API-Key'] = CONFIG.lrrApiKey; // 某些反代方案使用自定义头
+                const sep = options.url.includes('?') ? '&' : '?';
+                options.url = `${options.url}${sep}apikey=${encodeURIComponent(CONFIG.lrrApiKey)}`;
+            }
 
             timeoutId = setTimeout(() => {
                 console.warn(`[LRR Checker] Request timeout after ${timeout}ms: ${options.url}`);
@@ -615,6 +631,13 @@
                 responseType: 'text',
                 onload: function(response) {
                     clearTimeout(timeoutId);
+                    // 认证/跨域排查：打印状态码与响应前200字
+                    try {
+                        const snippet = (response.responseText || '').slice(0, 200);
+                        console.log(`[LRR Checker] HTTP ${response.status} <- ${options.url} bodyHead="${snippet}"`);
+                    } catch (e) {
+                        console.warn('[LRR Checker] 打印响应失败', e);
+                    }
                     // status 0 可能是沙箱限制，但可能仍有 responseText
                     if (response.status === 0 && !response.responseText) {
                         console.warn(`[LRR Checker] Received empty response (status 0, no text)`);
@@ -1375,23 +1398,39 @@
         console.log(`[LRR Checker] Fetching thumbnail: ${thumbnailUrl}`);
 
         return new Promise((resolve) => {
+            // 构造认证头：与 makeRequest 保持一致，Bearer 采用 base64，额外带 X-API-Key
+            const headers = {};
+            if (CONFIG.lrrApiKey) {
+                let encodedKey = CONFIG.lrrApiKey;
+                try {
+                    encodedKey = btoa(CONFIG.lrrApiKey);
+                } catch (e) {
+                    console.warn('[LRR Checker] btoa 编码 API Key 失败（thumbnail），改用原始值', e);
+                }
+                headers['Authorization'] = `Bearer ${encodedKey}`;
+                headers['X-API-Key'] = CONFIG.lrrApiKey;
+                // 在 URL 上追加 apikey 查询参数
+                const sep = thumbnailUrl.includes('?') ? '&' : '?';
+                thumbnailUrl = `${thumbnailUrl}${sep}apikey=${encodeURIComponent(CONFIG.lrrApiKey)}`;
+            }
+
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: thumbnailUrl,
-                headers: {
-                    'Authorization': `Bearer ${CONFIG.lrrApiKey}`
-                },
+                headers,
                 responseType: 'arraybuffer',
                 onload: (response) => {
                     try {
-                        console.log(`[LRR Checker] Thumbnail response received`);
+                        console.log(`[LRR Checker] Thumbnail response received (HTTP ${response.status})`);
 
                         // 将 ArrayBuffer 转换为 Base64
                         const bytes = new Uint8Array(response.response);
                         console.log(`[LRR Checker] Got ${bytes.length} bytes`);
                         // 若返回的是错误JSON或HTML（通常首字节为 { 或 < ），直接放弃
                         if (bytes.length === 0 || bytes[0] === 123 || bytes[0] === 60) {
-                            console.warn('[LRR Checker] Thumbnail response looks like non-image, skipping');
+                            let head = '';
+                            try { head = new TextDecoder().decode(bytes.slice(0, 120)); } catch (e) {}
+                            console.warn('[LRR Checker] Thumbnail response looks like non-image, skipping; head=', head);
                             resolve(null);
                             return;
                         }
