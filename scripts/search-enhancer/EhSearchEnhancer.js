@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EhSearchEnhancer
 // @namespace    com.xioxin.EhSearchEnhancer
-// @version      2.3.5
+// @version      2.3.6
 // @description  E-Hentai搜索页增强脚本 - 多选、批量操作、磁链显示、反查、下载历史记录等功能
 // @author       AkiraShe
 // @match        *://e-hentai.org/*
@@ -3476,6 +3476,7 @@
         });
 
         // 添加shift多选支持（与磁链复选框相同的逻辑）
+        // 【修复】按DOM顺序（即calculateMagnetScoreGlobal的排序）选择第一个有效项，而不是按时间戳重新排序
         checkbox.addEventListener('click', (event) => {
             if (!event.shiftKey || !checkbox.checked) {
                 return;
@@ -3506,13 +3507,6 @@
                 const sameGroupBoxes = allCheckboxes.filter((candidate) => candidate.dataset.magnetGroup === group);
                 if (!sameGroupBoxes.length) continue;
 
-                const sortedByTimestamp = sameGroupBoxes
-                    .map((candidate) => ({
-                        candidate,
-                        timestamp: Number(candidate.dataset.magnetTimestamp || '0'),
-                    }))
-                    .sort((a, b) => b.timestamp - a.timestamp);
-
                 sameGroupBoxes.forEach((candidate) => {
                     if (candidate.checked) {
                         candidate.checked = false;
@@ -3524,17 +3518,18 @@
                     }
                 });
 
-                const latestEntry = sortedByTimestamp.find(({ candidate }) => {
-                    const infoData = buildGalleryInfoFromDataset(candidate.dataset);
-                    const candidateKey = candidate.dataset.magnetValue || candidate.dataset.archiveKey || '';
-                    return !shouldSkipSelectionForBox(candidate, infoData, candidateKey);
+                // 按DOM顺序选择第一个有效项（而不是按时间戳排序后选择最新的）
+                // 这样与磁链列表的显示顺序和评分排序保持一致
+                const targetBox_toSelect = sameGroupBoxes.find((box) => {
+                    const infoData = buildGalleryInfoFromDataset(box.dataset);
+                    const candidateKey = box.dataset.magnetValue || box.dataset.archiveKey || '';
+                    return !shouldSkipSelectionForBox(box, infoData, candidateKey);
                 });
 
-                if (latestEntry) {
-                    const latestBox = latestEntry.candidate;
-                    latestBox.checked = true;
-                    if (latestBox.dataset.magnetValue) selectedMagnets.add(latestBox.dataset.magnetValue);
-                    const infoLatest = buildGalleryInfoFromDataset(latestBox.dataset);
+                if (targetBox_toSelect) {
+                    targetBox_toSelect.checked = true;
+                    if (targetBox_toSelect.dataset.magnetValue) selectedMagnets.add(targetBox_toSelect.dataset.magnetValue);
+                    const infoLatest = buildGalleryInfoFromDataset(targetBox_toSelect.dataset);
                     if (infoLatest?.gid) selectedGalleries.set(infoLatest.gid, infoLatest);
                 }
             }
@@ -10112,13 +10107,6 @@
                         const sameGroupBoxes = allCheckboxes.filter((candidate) => candidate.dataset.magnetGroup === group);
                         if (!sameGroupBoxes.length) continue;
 
-                const sortedByTimestamp = sameGroupBoxes
-                    .map((candidate) => ({
-                        candidate,
-                        timestamp: Number(candidate.dataset.magnetTimestamp || '0'),
-                    }))
-                    .sort((a, b) => b.timestamp - a.timestamp);
-
                         sameGroupBoxes.forEach((candidate) => {
                             if (candidate.checked) {
                                 candidate.checked = false;
@@ -10130,17 +10118,18 @@
                             }
                         });
 
-                        const latestEntry = sortedByTimestamp.find(({ candidate }) => {
-                            const infoData = buildGalleryInfoFromDataset(candidate.dataset);
-                            const candidateKey = candidate.dataset.magnetValue || candidate.dataset.archiveKey || '';
-                            return !shouldSkipSelectionForBox(candidate, infoData, candidateKey);
+                        // 按DOM顺序选择第一个有效项（而不是按时间戳排序后选择最新的）
+                        // 这样与磁链列表的显示顺序和评分排序保持一致
+                        const targetBox_toSelect = sameGroupBoxes.find((box) => {
+                            const infoData = buildGalleryInfoFromDataset(box.dataset);
+                            const candidateKey = box.dataset.magnetValue || box.dataset.archiveKey || '';
+                            return !shouldSkipSelectionForBox(box, infoData, candidateKey);
                         });
 
-                        if (latestEntry) {
-                            const latestBox = latestEntry.candidate;
-                            latestBox.checked = true;
-                            if (latestBox.dataset.magnetValue) selectedMagnets.add(latestBox.dataset.magnetValue);
-                            const infoLatest = buildGalleryInfoFromDataset(latestBox.dataset);
+                        if (targetBox_toSelect) {
+                            targetBox_toSelect.checked = true;
+                            if (targetBox_toSelect.dataset.magnetValue) selectedMagnets.add(targetBox_toSelect.dataset.magnetValue);
+                            const infoLatest = buildGalleryInfoFromDataset(targetBox_toSelect.dataset);
                             if (infoLatest?.gid) selectedGalleries.set(infoLatest.gid, infoLatest);
                         }
                     }
